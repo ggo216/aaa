@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AAA</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ============ HOME SCREEN ============ -->
+  <section id="homeScreen" class="screen">
+    <div class="homeCard">
+      <div class="brand homeBrand">AAA</div>
+      <div class="brandSub">TOWER DEFENSE</div>
+      <div class="bestWaveRow"><span data-icon="wave"></span>최고 웨이브 <b id="bestWaveLabel">0</b></div>
+      <button id="goGameBtn" class="primaryBtn">게임 시작</button>
+      <button id="goCollectionBtn" class="secondaryBtn">카드함</button>
+    </div>
+  </section>
+
+  <!-- ============ GAME SCREEN ============ -->
+  <section id="gameScreen" class="screen hidden">
+    <header id="topbar">
+      <button class="navBtn" id="gameHomeBtn" data-icon="home" title="홈으로"></button>
+      <div class="brandWrap">
+        <div class="brand">AAA</div>
+        <div class="brandSub">TOWER DEFENSE</div>
+      </div>
+      <div class="statRow">
+        <div class="stat wave"><span class="statBadge" data-icon="wave"></span><div class="statText"><b id="waveLabel">0</b><small>웨이브</small></div></div>
+        <div class="stat timer"><span class="statBadge" data-icon="clock"></span><div class="statText"><b id="timerLabel">--</b><small>남은 시간</small></div></div>
+        <div class="stat gold"><span class="statBadge" data-icon="coin"></span><div class="statText"><b id="goldLabel">0</b><small>골드</small></div></div>
+        <div class="stat gem"><span class="statBadge" data-icon="gem"></span><div class="statText"><b id="gemLabel">0</b><small>특수재화</small></div></div>
+        <div class="stat swarm"><span class="statBadge" data-icon="swarm"></span><div class="statText"><b id="swarmLabel">0/50</b><small>필드 몬스터</small></div></div>
+      </div>
+    </header>
+    <div class="speedGroup">
+      <span class="speedLabel" data-icon="fastfwd" data-icon-label="배속"></span>
+      <button class="speedBtn" data-speed="1">1x</button>
+      <button class="speedBtn" data-speed="2">2x</button>
+      <button class="speedBtn" data-speed="3">3x</button>
+      <button class="speedBtn" data-speed="5">5x</button>
+      <button class="speedBtn" data-speed="10">10x</button>
+    </div>
+
+    <main id="layout">
+      <section id="fieldWrap">
+        <div id="wavePrepOverlay" class="overlay hidden">
+          <div class="overlayBox">
+            <div id="prepText">웨이브 시작까지</div>
+            <div id="prepCount">3</div>
+          </div>
+        </div>
+        <div id="gameOverOverlay" class="overlay hidden">
+          <div class="overlayBox">
+            <div>GAME OVER</div>
+            <div id="finalWave"></div>
+            <div id="finalGoldGain"></div>
+            <button id="restartBtn">다시 시작</button>
+          </div>
+        </div>
+        <canvas id="field" width="484" height="484"></canvas>
+        <div id="fieldFlash"></div>
+        <div id="waveToast" class="hidden"></div>
+        <div id="startRow">
+          <button id="startBtn">웨이브 시작</button>
+        </div>
+      </section>
+
+      <aside id="sidePanel">
+        <div class="row2">
+          <div class="panelBlock" id="summonBlock">
+            <div class="panelTitle"><span class="ptIcon" data-icon="sparkle"></span>소환</div>
+            <button id="summonBtn">소환 (10 골드)</button>
+          </div>
+
+          <div class="panelBlock" id="selectedBlock">
+            <div class="panelTitle"><span class="ptIcon" data-icon="target"></span>유닛 관리</div>
+            <div id="selectedInfo" class="selInfo">필드 또는 대기 유닛을 선택하세요</div>
+            <div class="selActions">
+              <button id="sellBtn" disabled>판매</button>
+              <button id="bulkSellBtn">일괄 판매</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panelBlock" id="upgradeBlock">
+          <div class="panelTitle"><span class="ptIcon" data-icon="bolt"></span>유닛 강화</div>
+          <div id="gameDeckList" class="upgradeList"></div>
+          <button id="gotoCollectionBtn" class="ghostBtn">카드함 보기</button>
+        </div>
+      </aside>
+    </main>
+
+    <div id="benchWrap">
+      <div class="panelTitle"><span class="ptIcon" data-icon="bag"></span>대기 유닛</div>
+      <div id="benchList" class="cardGrid"></div>
+    </div>
+  </section>
+
+  <!-- ============ COLLECTION + GACHA SCREEN ============ -->
+  <section id="collectionScreen" class="screen hidden">
+    <header id="collectionTopbar">
+      <button class="navBtn" id="collHomeBtn" data-icon="home" title="홈으로"></button>
+      <div class="brandWrap">
+        <div class="brand">카드함</div>
+        <div class="brandSub">DECK &amp; GACHA</div>
+      </div>
+      <div class="statRow">
+        <div class="stat coin"><span class="statBadge" data-icon="ticket"></span><div class="statText"><b id="collCoinLabel">0</b><small>카드코인</small></div></div>
+        <div class="stat gem"><span class="statBadge" data-icon="gem"></span><div class="statText"><b id="collGemLabel">0</b><small>특수재화</small></div></div>
+      </div>
+      <button class="navBtn ghostNav" id="collGameBtn" data-icon="wave" title="게임으로 돌아가기"></button>
+    </header>
+
+    <div id="collectionLayout">
+      <div class="panelBlock" id="deckPanel">
+        <div class="panelTitle"><span class="ptIcon" data-icon="target"></span>덱 구성</div>
+        <div id="deckLockNotice" class="lockNotice hidden"><span data-icon="lock"></span>게임 진행 중에는 덱을 변경할 수 없습니다</div>
+        <div id="deckSlots" class="deckSlots"></div>
+        <div id="setBonusInfo" class="setBonusInfo"></div>
+      </div>
+
+      <div class="panelBlock" id="gachaPanel">
+        <div class="panelTitle"><span class="ptIcon" data-icon="dice"></span>카드 뽑기</div>
+        <button id="gachaNormalBtn">일반 뽑기 (15 카드코인)</button>
+        <button id="gachaGemBtn">고급 뽑기 (5 특수재화)</button>
+      </div>
+    </div>
+
+    <div class="panelBlock" id="collectionListPanel">
+      <div class="panelTitle"><span class="ptIcon" data-icon="folder"></span>보유 카드 전체</div>
+      <div id="collectionList" class="collGrid"></div>
+    </div>
+  </section>
+
+  <div id="log"></div>
+</div>
+
+<script src="icons.js"></script>
+<script src="data.js"></script>
+<script src="game.js"></script>
+</body>
+</html>
