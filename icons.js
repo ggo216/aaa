@@ -19,7 +19,7 @@ const ICON_DOM = {
   gem: '<polygon points="12,3 20,9 16,21 8,21 4,9" fill-rule="evenodd"/><line x1="4" y1="9" x2="20" y2="9"/><line x1="8" y1="21" x2="12" y2="9"/><line x1="16" y1="21" x2="12" y2="9"/>',
   swarm: '<polygon points="12,3 20,8 20,16 12,21 4,16 4,8"/><circle cx="9" cy="11" r="1.1" fill="currentColor" stroke="none"/><circle cx="15" cy="11" r="1.1" fill="currentColor" stroke="none"/>',
   fastfwd: '<polygon points="3,5 11,12 3,19" fill="currentColor" stroke="none"/><polygon points="12,5 20,12 12,19" fill="currentColor" stroke="none"/>',
-  sparkle: '<path d="M12 2 L14 10 L22 12 L14 14 L12 22 L10 14 L2 12 L10 10 Z" fill-rule="evenodd"/>',
+  sparkle: '<path d="M12 2 L14 10 L22 12 L14 14 L12 22 L10 14 L2 12 L10 10 Z" fill="currentColor" stroke="none" fill-rule="evenodd"/>',
   target: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="0.8" fill="currentColor" stroke="none"/>',
   tag: '<path d="M3 11 L11 3 L20 3 L20 12 L12 20 Z" fill-rule="evenodd"/><circle cx="15.5" cy="7.5" r="1.3" fill="currentColor" stroke="none"/>',
   folder: '<path d="M3 6 h6 l2 2.5 h10 v11 h-18 Z" fill-rule="evenodd"/>',
@@ -29,7 +29,7 @@ const ICON_DOM = {
   ticket: '<rect x="2.5" y="6" width="19" height="12" rx="2.5"/><circle cx="14" cy="8" r="1" fill="currentColor" stroke="none"/><circle cx="14" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="14" cy="16" r="1" fill="currentColor" stroke="none"/><line x1="14" y1="6" x2="14" y2="18" stroke-dasharray="0.1 3"/>',
   x: '<line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/>',
   lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11 V8 a4 4 0 0 1 8 0 v3" fill="none"/><circle cx="12" cy="16" r="1.4" fill="currentColor" stroke="none"/>',
-  bolt: '<polygon points="13,2 4,14 11,14 9,22 20,9 12,9" fill-rule="evenodd"/>',
+  bolt: '<polygon points="13,2 4,14 11,14 9,22 20,9 12,9" fill="currentColor" stroke="none" fill-rule="evenodd"/>',
   plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
 };
 

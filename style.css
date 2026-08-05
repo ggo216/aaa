@@ -121,8 +121,8 @@ html, body {
 .stat.timer.boss-wave { background: #f7ede0; border-color: #e0c6a3; }
 .stat.timer.boss-wave .statBadge { background: #f0dcbc; color: #ab7638; }
 .stat.timer.boss-wave b { color: #ab7638; }
-.stat.timer.urgent { animation: urgentPulse 0.6s ease-in-out infinite; }
-.stat.timer.urgent b { color: var(--danger); }
+.stat.timer.urgent, .stat.swarm.urgent { animation: urgentPulse 0.6s ease-in-out infinite; }
+.stat.timer.urgent b, .stat.swarm.urgent b { color: var(--danger); }
 @keyframes urgentPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(209,73,95,0.3); } 50% { box-shadow: 0 0 0 5px rgba(224,48,79,0); } }
 .ptIcon { color: var(--accent); display: inline-flex; }
 .pulse b { animation: statPulse 0.35s ease; }
@@ -142,7 +142,11 @@ html, body {
 .speedBtn:hover:not(.active) { background: #e6e8ee; }
 
 /* ---------------- layout ---------------- */
-#layout { display: flex; gap: 16px; align-items: flex-start; justify-content: center; }
+#layout { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; justify-content: center; }
+/* bench sits between the field and the side panel; forcing it to its own full-width
+   row (rather than squeezing beside the panel) keeps the row layout readable */
+#layout #benchWrap { flex: 1 1 100%; order: 2; }
+#layout #sidePanel { order: 3; }
 #fieldWrap { position: relative; flex: 0 0 484px; }
 #field {
   background: #fbfbfd; border: 1px solid var(--panel-border); border-radius: var(--radius);
@@ -410,7 +414,9 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   .upgradeList { overflow-y: visible; }
   .collGrid { max-height: 40vh; }
 
-  #benchWrap { margin-top: 6px; padding: 8px 10px; flex-shrink: 0; }
+  /* override the desktop #layout #benchWrap row-wrapping rule (higher specificity) —
+     in column mode flex-basis:100% would mean height, not width, and break sizing */
+  #layout #benchWrap { flex: 0 0 auto; margin-top: 6px; padding: 8px 10px; }
   #benchWrap .cardGrid { display: flex; overflow-x: auto; max-height: none; padding-bottom: 2px; }
   #benchWrap .card { flex: 0 0 68px; }
 

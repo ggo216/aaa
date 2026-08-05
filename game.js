@@ -20,6 +20,7 @@ const HUD = {
   collCoin: document.getElementById('collCoinLabel'),
 };
 HUD.timerStat = HUD.timer.closest('.stat');
+HUD.swarmStat = HUD.swarm.closest('.stat');
 HUD.goldStat = HUD.gold.closest('.stat');
 HUD.gemStat = HUD.gem.closest('.stat');
 HUD.collGemStat = HUD.collGem ? HUD.collGem.closest('.stat') : null;
@@ -997,6 +998,8 @@ function updateHud() {
   const isBossWave = state.wave > 0 && state.wave % 10 === 0;
   HUD.timerStat.classList.toggle('boss-wave', isBossWave && state.phase === 'wave');
   HUD.timerStat.classList.toggle('urgent', isBossWave && state.phase === 'wave' && state.waveTimer <= 8 && state.bossAliveThisWave);
+  // early warning before the 50-monster instant game-over, mirroring the boss-timer urgency cue
+  HUD.swarmStat.classList.toggle('urgent', state.monsters.length >= 40);
   syncCurrencyDisplays();
 }
 
