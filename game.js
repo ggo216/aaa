@@ -981,6 +981,7 @@ function render() {
   if (state.screen === 'home') renderHome();
   if (state.screen === 'game') renderGame();
   if (state.screen === 'collection') renderCollectionScreen();
+  if (typeof scheduleCloudSave === 'function') scheduleCloudSave();
 }
 
 function renderHome() {
@@ -1044,13 +1045,30 @@ function renderGame() {
     const inst = state.selected.kind === 'bench' ? state.bench[state.selected.idx] : state.placed[state.selected.key];
     if (inst) {
       const def = defOf(inst); const grade = gradeOf(inst); const stats = computeStats(inst); const lvl = levelOf(inst.defId);
-      selEl.innerHTML = `<b>${def.name}</b> [${def.variant}] - <span style="color:${grade.color}">${inst.grade}</span> ${lvl > 0 ? `<span class="lvlTag">+${lvl}</span>` : ''}<br>
-        공격력 ${stats.atk.toFixed(1)} / 사거리 ${stats.fullRange ? '전체' : stats.range.toFixed(2)} / 공속 ${stats.aspd.toFixed(2)}<br>
-        치확 ${stats.critChance.toFixed(0)}% 치피 ${stats.critDmg.toFixed(0)}% ${stats.bossDmg ? `보스피해 ${stats.bossDmg.toFixed(0)}%` : ''}<br>
-        판매가 ${GRADE_SELL_PRICE[inst.grade]} 골드`;
+      const statCells = [
+        { label: '공격력', value: stats.atk.toFixed(1) },
+        { label: '사거리', value: stats.fullRange ? '전체' : stats.range.toFixed(2) },
+        { label: '공속', value: stats.aspd.toFixed(2) },
+        { label: '치확', value: stats.critChance.toFixed(0) + '%' },
+        { label: '치피', value: stats.critDmg.toFixed(0) + '%' },
+      ];
+      if (stats.bossDmg) statCells.push({ label: '보스피해', value: stats.bossDmg.toFixed(0) + '%' });
+      selEl.innerHTML = `
+        <div class="unitHead">
+          <span class="unitIcon" style="color:${grade.color}">${svgIcon(def.icon, 22)}</span>
+          <div class="unitHeadText">
+            <div class="unitName">${def.name} <span class="unitVariant">${def.variant}</span></div>
+            <div class="unitSub"><span class="gradePill" style="background:${grade.color}">${inst.grade}</span>${lvl > 0 ? `<span class="lvlTag">+${lvl}</span>` : ''}</div>
+          </div>
+        </div>
+        <div class="statGrid">
+          ${statCells.map(s => `<div class="statCell"><small>${s.label}</small><b>${s.value}</b></div>`).join('')}
+        </div>
+        <div class="sellRow">판매가 <b>${GRADE_SELL_PRICE[inst.grade]}</b> 골드</div>
+      `;
       sellBtn.disabled = false;
-    } else { selEl.textContent = '-'; sellBtn.disabled = true; }
-  } else { selEl.textContent = '-'; sellBtn.disabled = true; }
+    } else { selEl.innerHTML = ''; sellBtn.disabled = true; }
+  } else { selEl.innerHTML = ''; sellBtn.disabled = true; }
 
   document.getElementById('summonBtn').disabled = state.gold < 10 || state.activeDeck.length === 0 || state.phase === 'gameover';
 

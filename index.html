@@ -19,6 +19,19 @@
       <div class="bestWaveRow"><span data-icon="wave"></span>최고 웨이브 <b id="bestWaveLabel">0</b></div>
       <button id="goGameBtn" class="primaryBtn">게임 시작</button>
       <button id="goCollectionBtn" class="secondaryBtn">카드함</button>
+
+      <div id="authBlock">
+        <div id="authSignedOut">
+          <button id="googleSignInBtn" class="googleBtn">
+            <span class="googleG">G</span>Google로 로그인
+          </button>
+        </div>
+        <div id="authSignedIn" class="hidden">
+          <div id="authUserName" class="authUserName"></div>
+          <button id="signOutBtn" class="ghostBtn">로그아웃</button>
+        </div>
+        <div id="cloudStatus" class="cloudStatus">로그인하면 다른 기기에서도 이어할 수 있어요</div>
+      </div>
     </div>
   </section>
 
@@ -141,8 +154,13 @@
   <div id="log"></div>
 </div>
 
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+<script src="firebase-config.js"></script>
 <script src="icons.js"></script>
 <script src="data.js"></script>
 <script src="game.js"></script>
+<script src="cloud.js"></script>
 </body>
 </html>

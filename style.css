@@ -58,6 +58,21 @@ html, body {
 .secondaryBtn { background: #f0f1f5; color: var(--text); border: 1px solid var(--panel-border); }
 .secondaryBtn:hover { background: #e6e8ee; }
 
+#authBlock { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--panel-border); width: 100%; }
+.googleBtn {
+  width: 200px; padding: 10px; font-size: 12.5px; border-radius: 999px; display: inline-flex;
+  align-items: center; justify-content: center; gap: 8px; background: #fff; color: var(--text);
+  border: 1px solid var(--panel-border); box-shadow: var(--shadow-sm);
+}
+.googleBtn:hover { background: #f6f7fb; }
+.googleG {
+  width: 18px; height: 18px; border-radius: 50%; background: var(--accent); color: #fff;
+  font-weight: 800; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.authUserName { font-size: 12.5px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+.cloudStatus { font-size: 10.5px; color: var(--text-faint); margin-top: 8px; line-height: 1.5; }
+#authSignedOut.hidden, #authSignedIn.hidden { display: none; }
+
 .navBtn {
   width: 38px; height: 38px; border-radius: 50%; background: #f0f1f5; border: 1px solid var(--panel-border);
   display: flex; align-items: center; justify-content: center; padding: 0; color: var(--text-dim); flex-shrink: 0;
@@ -213,6 +228,29 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 #gachaGemBtn:hover:not(:disabled) { filter: brightness(1.05); }
 
 .selInfo { font-size: 12.5px; line-height: 1.75; min-height: 44px; color: var(--text); }
+.selInfo:empty { min-height: 0; }
+
+.unitHead { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; }
+.unitIcon {
+  width: 34px; height: 34px; border-radius: 10px; background: #f6f7fb; border: 1px solid var(--panel-border);
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.unitHeadText { min-width: 0; }
+.unitName { font-weight: 800; font-size: 12.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.unitVariant { font-weight: 600; color: var(--text-faint); font-size: 11px; }
+.unitSub { display: flex; align-items: center; gap: 5px; margin-top: 3px; }
+.gradePill { display: inline-block; color: #fff; font-weight: 800; font-size: 10px; padding: 1px 7px; border-radius: 999px; }
+
+.statGrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; margin-bottom: 8px; }
+.statCell {
+  background: #f6f7fb; border-radius: 8px; padding: 6px 4px; text-align: center;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.statCell small { font-size: 9px; color: var(--text-faint); font-weight: 600; }
+.statCell b { font-size: 12px; color: var(--text); font-weight: 800; }
+
+.sellRow { font-size: 11px; color: var(--text-faint); font-weight: 600; }
+.sellRow b { color: var(--text); font-weight: 800; }
 .lvlTag { color: var(--accent); font-weight: 800; background: var(--accent-soft); padding: 1px 6px; border-radius: 6px; font-size: 11px; }
 .selActions { margin-top: 10px; display: flex; gap: 6px; }
 .selActions button { flex: 1; }
@@ -353,7 +391,10 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
      would overflow the squeezed box and visually overlap whatever came after it
      (#benchWrap). Any excess total height is instead handled by #gameScreen's own
      overflow-y:auto, which scrolls the whole screen gracefully instead of overlapping. */
-  #layout { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; }
+  /* desktop #layout sets align-items:flex-start + justify-content:center for its
+     row layout; must be reset here or the column children (sidePanel/benchWrap)
+     stay shrunk to their content width instead of stretching full-width */
+  #layout { flex: 0 0 auto; display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 6px; }
   #fieldWrap { flex: 0 0 auto; width: 100%; max-width: min(82vw, 38vh); margin: 0 auto; }
   #field { width: 100%; height: auto; display: block; }
   #startRow { margin-top: 6px; }
@@ -361,7 +402,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 
   /* summon / unit-management share a compact row; unit upgrade gets its own
      full-width row sized to actually fit every deck slot with no inner scrolling */
-  #sidePanel { display: flex; flex-direction: column; flex: 0 0 auto; gap: 6px; }
+  #sidePanel { display: flex; flex-direction: column; flex: 0 0 auto; width: 100%; max-width: none; min-width: 0; gap: 6px; }
   #sidePanel .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
   #sidePanel .panelBlock { padding: 7px 9px; display: flex; flex-direction: column; min-height: 0; }
   #sidePanel .panelTitle { margin-bottom: 4px; font-size: 10.5px; }
