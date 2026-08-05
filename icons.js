@@ -31,6 +31,7 @@ const ICON_DOM = {
   lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11 V8 a4 4 0 0 1 8 0 v3" fill="none"/><circle cx="12" cy="16" r="1.4" fill="currentColor" stroke="none"/>',
   bolt: '<polygon points="13,2 4,14 11,14 9,22 20,9 12,9" fill="currentColor" stroke="none" fill-rule="evenodd"/>',
   plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+  flask: '<path d="M9 3 h6 M10 3 v6 L5 18 a2 2 0 0 0 2 3 h10 a2 2 0 0 0 2 -3 L14 9 V3" fill="none"/><path d="M7.5 14 h9" fill="none"/><circle cx="12" cy="17" r="1.1" fill="currentColor" stroke="none"/>',
 };
 
 function svgIcon(name, size = 18, color = 'currentColor') {

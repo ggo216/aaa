@@ -260,6 +260,10 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .selActions button { flex: 1; }
 #sellBtn { background: linear-gradient(120deg, var(--danger), #dd6b7e); color: #fff; border: none; }
 #sellBtn:hover:not(:disabled) { filter: brightness(1.05); }
+/* bulk-sell isn't the "irreversible single click" danger action sellBtn is, so it
+   stays in the blue accent family rather than competing with it as a second red button */
+#bulkSellBtn { background: var(--accent-soft); color: var(--accent); border: 1px solid rgba(74,114,214,0.25); }
+#bulkSellBtn:hover:not(:disabled) { background: #e3e9fa; }
 
 /* ---------------- rarity cards ---------------- */
 .cardGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(82px, 1fr)); gap: 9px; max-height: 270px; overflow-y: auto; padding: 2px; }
@@ -330,6 +334,14 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .deckSlot.locked { cursor: not-allowed; opacity: 0.85; }
 .collCard.locked { cursor: default; }
 .collCard.locked:hover { transform: none; }
+.collCard.unaddable { opacity: 0.5; }
+.collCard.unaddable:hover { transform: none; }
+
+.deckCount {
+  font-size: 10px; font-weight: 800; color: var(--text-faint); background: #f0f1f5;
+  border-radius: 999px; padding: 1px 8px; text-transform: none; letter-spacing: 0;
+}
+.deckCount.full { color: var(--accent); background: var(--accent-soft); }
 
 .upgradeList { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
 .upgradeRow {
@@ -338,29 +350,72 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 }
 .upgradeIcon { display: flex; flex-shrink: 0; }
 .upgradeName { flex: 1; font-size: 11.5px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.upgradeBtn { flex-shrink: 0; padding: 5px 9px; font-size: 10.5px; background: var(--success); color: #fff; border: none; }
+.upgradeBtn { flex-shrink: 0; padding: 5px 9px; font-size: 10.5px; background: linear-gradient(120deg, var(--accent), var(--accent-2)); color: #fff; border: none; }
 .upgradeBtn:hover:not(:disabled) { filter: brightness(1.08); }
 
 .collGrid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 11px;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); gap: 8px;
   max-height: 46vh; overflow-y: auto; padding: 4px 4px 4px 0;
 }
 .collCard {
-  position: relative; border: 2px solid var(--panel-border); border-radius: 14px; padding: 14px 10px 12px;
+  position: relative; border: 2px solid var(--panel-border); border-radius: 11px; padding: 9px 6px 8px;
   text-align: center; background: #fafbfd; overflow: hidden; transition: transform 0.1s, box-shadow 0.1s; cursor: pointer;
 }
 .collCard:hover { transform: translateY(-2px); }
 .collCard.inDeck { box-shadow: 0 0 0 3px rgba(74,114,214,0.25); }
 .collCard .deckBadge {
-  position: absolute; top: 6px; left: 6px; background: var(--accent); color: #fff; font-size: 9px; font-weight: 800;
-  border-radius: 6px; padding: 1px 6px;
+  position: absolute; top: 4px; left: 4px; background: var(--accent); color: #fff; font-size: 7.5px; font-weight: 800;
+  border-radius: 5px; padding: 1px 5px;
 }
-.collIcon { display: flex; align-items: center; justify-content: center; height: 32px; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.08)); }
-.collName { font-weight: 800; font-size: 12px; margin-top: 7px; }
-.collSub { font-size: 10.5px; color: var(--text-faint); margin-top: 1px; font-weight: 600; }
-.collRow { font-size: 11px; margin: 9px 0; color: var(--text); font-weight: 600; }
-.enhanceBtn { width: 100%; background: linear-gradient(120deg, var(--accent), var(--accent-2)); color: #fff; border: none; font-size: 11px; padding: 8px; font-weight: 800; }
+.collIcon { display: flex; align-items: center; justify-content: center; height: 24px; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.08)); }
+.collIcon svg { width: 22px; height: 22px; }
+.collName { font-weight: 800; font-size: 10.5px; margin-top: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.collSub { font-size: 9px; color: var(--text-faint); margin-top: 1px; font-weight: 600; }
+.collStats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; margin-top: 6px; }
+.collStats div { background: #f6f7fb; border-radius: 6px; padding: 3px 1px; display: flex; flex-direction: column; gap: 1px; }
+.collStats small { font-size: 7px; color: var(--text-faint); font-weight: 600; }
+.collStats b { font-size: 9.5px; color: var(--text); font-weight: 800; }
+.collRow { font-size: 9.5px; margin: 6px 0; color: var(--text); font-weight: 600; }
+.enhanceBtn { width: 100%; background: linear-gradient(120deg, var(--accent), var(--accent-2)); color: #fff; border: none; font-size: 9.5px; padding: 6px; font-weight: 800; }
 .enhanceBtn:hover:not(:disabled) { filter: brightness(1.05); }
+
+/* ---------------- research lab (skill tree) ---------------- */
+#labTopbar {
+  display: flex; align-items: center; gap: 16px;
+  background: rgba(255,255,255,0.86); backdrop-filter: blur(10px);
+  border: 1px solid var(--panel-border); border-radius: var(--radius-lg);
+  padding: 12px 22px; margin-bottom: 12px; flex-wrap: wrap; box-shadow: var(--shadow);
+}
+#labTopbar .stat.coin { margin-left: auto; }
+#labSubTabs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 12px; }
+.labTab {
+  display: flex; align-items: center; gap: 6px; flex-shrink: 0; padding: 8px 14px; font-size: 11.5px;
+  border-radius: 999px; background: #f0f1f5; color: var(--text-dim); border: 1px solid var(--panel-border);
+}
+.labTab.active { background: linear-gradient(120deg, var(--accent), var(--accent-2)); color: #fff; border-color: transparent; }
+#labTreePanel { padding: 22px 16px; }
+.labRow { display: flex; justify-content: center; gap: 16px; margin-bottom: 22px; position: relative; }
+.labRow:not(:last-child)::after { content: ''; }
+.labNode {
+  width: 150px; background: #fafbfd; border: 2px solid var(--panel-border); border-radius: 14px;
+  padding: 12px 10px; text-align: center; position: relative;
+}
+.labNode.active { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(74,114,214,0.15); }
+.labNode.skillNode { border-color: #c1465f; background: #fdf3f5; }
+.labNode.skillNode.active { box-shadow: 0 0 0 3px rgba(193,70,95,0.18); }
+.labSkillTag { background: #c1465f; color: #fff; font-size: 8px; font-weight: 800; padding: 1px 5px; border-radius: 999px; vertical-align: middle; }
+.labNode.locked { opacity: 0.55; }
+.labNodeIcon {
+  width: 34px; height: 34px; margin: 0 auto 6px; border-radius: 10px; background: var(--accent-soft);
+  color: var(--accent); display: flex; align-items: center; justify-content: center;
+}
+.labNode.locked .labNodeIcon { background: #eceef3; color: var(--text-faint); }
+.labNodeName { font-weight: 800; font-size: 11.5px; }
+.labNodeEffect { font-size: 10px; color: var(--text-faint); margin-top: 3px; min-height: 14px; }
+.labNodeLevel { font-size: 10px; font-weight: 700; color: var(--accent); margin-top: 4px; }
+.labNodeBtn { width: 100%; margin-top: 8px; font-size: 10.5px; padding: 7px; background: var(--success); color: #fff; border: none; }
+.labNodeBtn:hover:not(:disabled) { filter: brightness(1.05); }
+.labNodeBtn:disabled { background: #e6e8ee; color: var(--text-faint); }
 
 /* ==================== MOBILE ==================== */
 @media (max-width: 760px) {
@@ -421,10 +476,26 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   #benchWrap .card { flex: 0 0 68px; }
 
   /* ---- collection screen ---- */
+  /* same fix as #layout: children must not shrink below content size, or they
+     get squeezed and their contents visually overlap the section that follows */
   #collectionScreen { display: flex; flex-direction: column; height: 100dvh; max-height: 100dvh; padding: 6px; overflow-y: auto; }
-  #collectionTopbar { padding: 6px 8px; gap: 6px; }
-  #collectionLayout { flex-direction: column; gap: 8px; }
+  #collectionTopbar { padding: 6px 8px; gap: 6px; flex-shrink: 0; }
+  #collectionLayout { flex-direction: column; gap: 8px; flex-shrink: 0; }
+  #deckPanel, #gachaPanel { flex-shrink: 0; min-width: 0; }
+  #collectionListPanel { flex-shrink: 0; }
   .deckSlots { gap: 5px; }
   .deckSlot .cname { display: none; }
   .collGrid { grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); max-height: 44vh; }
+
+  /* ---- research lab screen (same shrink-proofing pattern as the other screens) ---- */
+  #labScreen { display: flex; flex-direction: column; height: 100dvh; max-height: 100dvh; padding: 6px; overflow-y: auto; }
+  #labTopbar { padding: 6px 8px; gap: 8px; flex-shrink: 0; }
+  #labSubTabs { flex-shrink: 0; margin-bottom: 8px; }
+  .labTab span { display: none; }
+  .labTab { padding: 8px; }
+  #labTreePanel { flex-shrink: 0; padding: 14px 8px; }
+  .labRow { gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+  .labNode { width: 104px; padding: 9px 6px; }
+  .labNodeName { font-size: 10px; }
+  .labNodeEffect { font-size: 8.5px; }
 }

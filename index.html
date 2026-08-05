@@ -19,6 +19,7 @@
       <div class="bestWaveRow"><span data-icon="wave"></span>최고 웨이브 <b id="bestWaveLabel">0</b></div>
       <button id="goGameBtn" class="primaryBtn">게임 시작</button>
       <button id="goCollectionBtn" class="secondaryBtn">카드함</button>
+      <button id="goLabBtn" class="secondaryBtn">연구실</button>
 
       <div id="authBlock">
         <div id="authSignedOut">
@@ -47,7 +48,6 @@
         <div class="stat wave"><span class="statBadge" data-icon="wave"></span><div class="statText"><b id="waveLabel">0</b><small>웨이브</small></div></div>
         <div class="stat timer"><span class="statBadge" data-icon="clock"></span><div class="statText"><b id="timerLabel">--</b><small>남은 시간</small></div></div>
         <div class="stat gold"><span class="statBadge" data-icon="coin"></span><div class="statText"><b id="goldLabel">0</b><small>골드</small></div></div>
-        <div class="stat gem"><span class="statBadge" data-icon="gem"></span><div class="statText"><b id="gemLabel">0</b><small>특수재화</small></div></div>
         <div class="stat swarm"><span class="statBadge" data-icon="swarm"></span><div class="statText"><b id="swarmLabel">0/50</b><small>필드 몬스터</small></div></div>
       </div>
     </header>
@@ -127,12 +127,13 @@
         <div class="stat coin"><span class="statBadge" data-icon="ticket"></span><div class="statText"><b id="collCoinLabel">0</b><small>카드코인</small></div></div>
         <div class="stat gem"><span class="statBadge" data-icon="gem"></span><div class="statText"><b id="collGemLabel">0</b><small>특수재화</small></div></div>
       </div>
+      <button class="navBtn" id="collLabBtn" data-icon="flask" title="연구실"></button>
       <button class="navBtn ghostNav" id="collGameBtn" data-icon="wave" title="게임으로 돌아가기"></button>
     </header>
 
     <div id="collectionLayout">
       <div class="panelBlock" id="deckPanel">
-        <div class="panelTitle"><span class="ptIcon" data-icon="target"></span>덱 구성</div>
+        <div class="panelTitle"><span class="ptIcon" data-icon="target"></span>덱 구성 <span id="deckCountLabel" class="deckCount"></span></div>
         <div id="deckLockNotice" class="lockNotice hidden"><span data-icon="lock"></span>게임 진행 중에는 덱을 변경할 수 없습니다</div>
         <div id="deckSlots" class="deckSlots"></div>
         <div id="setBonusInfo" class="setBonusInfo"></div>
@@ -148,6 +149,25 @@
     <div class="panelBlock" id="collectionListPanel">
       <div class="panelTitle"><span class="ptIcon" data-icon="folder"></span>보유 카드 전체</div>
       <div id="collectionList" class="collGrid"></div>
+    </div>
+  </section>
+
+  <!-- ============ RESEARCH LAB (SKILL TREE) SCREEN ============ -->
+  <section id="labScreen" class="screen hidden">
+    <header id="labTopbar">
+      <button class="navBtn" id="labHomeBtn" data-icon="home" title="홈으로"></button>
+      <div class="brandWrap">
+        <div class="brand">연구실</div>
+        <div class="brandSub">SKILL TREE</div>
+      </div>
+      <div class="stat coin"><span class="statBadge" data-icon="flask"></span><div class="statText"><b id="labTokenLabel">0</b><small id="labTokenSubLabel">토큰</small></div></div>
+      <button class="navBtn ghostNav" id="labCollBtn" data-icon="folder" title="카드함으로"></button>
+    </header>
+
+    <div id="labSubTabs"></div>
+
+    <div id="labTreePanel" class="panelBlock">
+      <div id="labTreeGrid"></div>
     </div>
   </section>
 

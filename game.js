@@ -15,14 +15,12 @@ const HUD = {
   swarm: document.getElementById('swarmLabel'),
   timer: document.getElementById('timerLabel'),
   gold: document.getElementById('goldLabel'),
-  gem: document.getElementById('gemLabel'),
-  collGem: document.getElementById('collGemLabel'),
+  collGem: document.getElementById('collGemLabel'), // gems (특수재화) only ever shown on the collection screen now
   collCoin: document.getElementById('collCoinLabel'),
 };
 HUD.timerStat = HUD.timer.closest('.stat');
 HUD.swarmStat = HUD.swarm.closest('.stat');
 HUD.goldStat = HUD.gold.closest('.stat');
-HUD.gemStat = HUD.gem.closest('.stat');
 HUD.collGemStat = HUD.collGem ? HUD.collGem.closest('.stat') : null;
 HUD.collCoinStat = HUD.collCoin ? HUD.collCoin.closest('.stat') : null;
 
@@ -87,8 +85,11 @@ const state = {
   collection: {}, // defId -> { count, level }
   activeDeck: [], // up to DECK_SIZE defIds; only these are summonable
   deckBonus: {},
-  deckLocked: false, // true once a run has started; deck composition is frozen
   runUpgrades: {}, // defId -> level; gold-funded, in-run only, resets on reload/restart
+  labTokens: {}, // subKey -> token count, earned 2 per card enhancement level-up
+  labProgress: {}, // subKey -> { nodeId -> level }, persistent, benefits every card of that subtype
+  labSelectedSub: 'atk_single',
+  allyBuff: null, // { until, atkPct, aspdPct } set by a buff_support legendary skill activation
   instSeq: 0,
   selected: null, // {kind:'bench', idx} | {kind:'field', key}
   projectiles: [],
@@ -125,13 +126,20 @@ function enhanceCard(defId) {
   if (entry.level >= ENHANCE_MAX_LEVEL || entry.count < req) return;
   entry.count -= req;
   entry.level += 1;
-  const def = UNIT_DEFS.find(d => d.id === defId);
-  log(`${def.name} 강화! Lv.${entry.level}`);
+  const def = UNIT_DEFS_BY_ID[defId];
+  // every card level-up feeds 2 연구실 skill tokens into that subtype's tree
+  state.labTokens[def.subKey] = (state.labTokens[def.subKey] || 0) + 2;
+  log(`${def.name} 강화! Lv.${entry.level} (+2 ${SUBTYPES[def.subKey].name} 연구 토큰)`);
   render();
 }
 
+// deck editing is only locked while a wave is actually in progress (prep countdown
+// or live combat) — computed live from phase so it can never go stale, unlike a
+// separate manually-toggled flag that stayed true even after the run had ended
+function isRunLocked() { return state.phase === 'prep' || state.phase === 'wave'; }
+
 function toggleDeckCard(defId) {
-  if (state.deckLocked) { log('게임 진행 중에는 덱을 변경할 수 없습니다'); render(); return; }
+  if (isRunLocked()) { log('웨이브 진행 중에는 덱을 변경할 수 없습니다'); render(); return; }
   const idx = state.activeDeck.indexOf(defId);
   if (idx >= 0) {
     state.activeDeck.splice(idx, 1);
@@ -156,7 +164,7 @@ function upgradeRunType(defId) {
   if (state.gold < cost) return;
   state.gold -= cost;
   state.runUpgrades[defId] = lvl + 1;
-  const def = UNIT_DEFS.find(d => d.id === defId);
+  const def = UNIT_DEFS_BY_ID[defId];
   log(`${def.name} 인게임 강화! Lv.${lvl + 1} (이번 판에만 적용)`);
   render();
 }
@@ -172,7 +180,7 @@ const CAT_EFFECT = {
 
 function computeDeckBonuses() {
   const bonus = { atkPct: 0, aspdPct: 0, critChanceAdd: 0, bossDmgAdd: 0, allPct: 0, notes: [] };
-  const deck = state.activeDeck.map(id => UNIT_DEFS.find(d => d.id === id)).filter(Boolean);
+  const deck = state.activeDeck.map(id => UNIT_DEFS_BY_ID[id]).filter(Boolean);
   if (deck.length === 0) return bonus;
 
   const catCount = {};
@@ -211,13 +219,74 @@ function computeDeckBonuses() {
 
 function updateDeckBonus() { state.deckBonus = computeDeckBonuses(); }
 
-function makeInstance(defId, grade) {
-  state.instSeq++;
-  return { instId: 'i' + state.instSeq, defId, grade: grade.id, cooldown: 0, cellKey: null, buffs: null };
+// ---------------- 연구실 (research lab / skill trees) ----------------
+function labNodeLevel(subKey, nodeId) {
+  return (state.labProgress[subKey] && state.labProgress[subKey][nodeId]) || 0;
 }
 
-function defOf(instance) { return UNIT_DEFS.find(d => d.id === instance.defId); }
-function gradeOf(instance) { return GRADES.find(g => g.id === instance.grade); }
+function labNodeUnlocked(subKey, node) {
+  if (!node.requires) return true;
+  return labNodeLevel(subKey, node.requires.id) >= node.requires.level;
+}
+
+function upgradeLabNode(subKey, nodeId) {
+  const tree = LAB_TREES[subKey];
+  const node = tree.find(n => n.id === nodeId);
+  if (!node || !labNodeUnlocked(subKey, node)) return;
+  const level = labNodeLevel(subKey, nodeId);
+  const cost = labNodeCost(level);
+  const tokens = state.labTokens[subKey] || 0;
+  if (tokens < cost) return;
+  state.labTokens[subKey] = tokens - cost;
+  state.labProgress[subKey] = state.labProgress[subKey] || {};
+  state.labProgress[subKey][nodeId] = level + 1;
+  log(`${node.name} Lv.${level + 1} 습득!`);
+  render();
+}
+
+// aggregate bonus from every node in a subtype's tree; benefits ALL owned/placed
+// cards of that subtype regardless of their individual grade or card tier
+function computeLabBonus(subKey) {
+  const bonus = {
+    atkPct: 0, aspdPct: 0, critChanceAdd: 0, slowAdd: 0, debuffPct: 0, rangePct: 0, skillDmgPct: 0,
+    normalDmgPct: 0, bossDmgPct: 0, splashPct: 0, dotChance: 0, extraAtkChance: 0,
+    auraCritChance: 0, auraCritDmg: 0, auraBossDmg: 0,
+  };
+  const tree = LAB_TREES[subKey];
+  if (!tree) return bonus;
+  for (const node of tree) {
+    const lvl = labNodeLevel(subKey, node.id);
+    if (lvl > 0 && node.effectKey in bonus) bonus[node.effectKey] += node.perLevel * lvl;
+  }
+  return bonus;
+}
+
+function makeInstance(defId, grade) {
+  state.instSeq++;
+  return { instId: 'i' + state.instSeq, defId, grade: grade.id, cooldown: 0, cellKey: null, buffs: null, skillCooldown: SKILL_INTERVAL };
+}
+
+// O(1) lookups instead of UNIT_DEFS.find()/GRADES.find() linear scans — these run
+// many times per unit per combat tick (computeStats, tickCombat, updateSupportBuffs,
+// draw, ...), so an O(n) scan through 126 defs on every call was a real hot-path cost
+const UNIT_DEFS_BY_ID = {};
+for (const d of UNIT_DEFS) UNIT_DEFS_BY_ID[d.id] = d;
+const GRADES_BY_ID = {};
+for (const g of GRADES) GRADES_BY_ID[g.id] = g;
+function defOf(instance) { return UNIT_DEFS_BY_ID[instance.defId]; }
+function gradeOf(instance) { return GRADES_BY_ID[instance.grade]; }
+
+// base-line stats for a card in the collection grid: E-grade, no summon-instance
+// randomness, no deck/support buffs — just the card's own enhancement level, so
+// cards can be compared apples-to-apples before you ever summon one
+function previewCardStats(defId) {
+  const def = UNIT_DEFS_BY_ID[defId];
+  const lvl = levelOf(defId);
+  const atk = def.base.atk * (1 + lvl * ENHANCE_STAT_BONUS.atk);
+  const range = def.base.range * (1 + lvl * ENHANCE_STAT_BONUS.range);
+  const aspd = def.base.aspd * (1 + lvl * ENHANCE_STAT_BONUS.aspd);
+  return { atk, range, aspd, targets: def.base.targets };
+}
 
 function computeStats(instance) {
   const def = defOf(instance);
@@ -256,8 +325,29 @@ function computeStats(instance) {
     critChance += (db.critChanceAdd || 0);
     bossDmg += (db.bossDmgAdd || 0);
   }
+  // apply 연구실 (research lab) subtype skill tree — benefits every card of this
+  // subtype regardless of that card's own tier/grade
+  const lab = computeLabBonus(def.subKey);
+  let debuffPct = lab.debuffPct || 0;
+  let skillDmgPct = lab.skillDmgPct || 0;
+  let normalDmgPct = lab.normalDmgPct || 0;
+  let splashPct = lab.splashPct || 0;
+  let dotChance = lab.dotChance || 0;
+  let extraAtkChance = lab.extraAtkChance || 0;
+  atk *= (1 + (lab.atkPct || 0) / 100);
+  aspd *= (1 + (lab.aspdPct || 0) / 100);
+  range *= (1 + (lab.rangePct || 0) / 100);
+  critChance += (lab.critChanceAdd || 0);
+  slow += (lab.slowAdd || 0);
+  bossDmg += (lab.bossDmgPct || 0);
+  // field-wide temporary buff from a buff_support legendary skill activation
+  if (state.allyBuff && performance.now() < state.allyBuff.until) {
+    atk *= (1 + (state.allyBuff.atkPct || 0) / 100);
+    aspd *= (1 + (state.allyBuff.aspdPct || 0) / 100);
+  }
   return {
-    atk, range, aspd, critChance, critDmg, bossDmg, slow, targets,
+    atk, range, aspd, critChance, critDmg, bossDmg, slow, targets, debuffPct, skillDmgPct,
+    normalDmgPct, splashPct, dotChance, extraAtkChance,
     splash: def.base.splash, cc: def.base.cc, debuff: def.base.debuff, support: def.base.support,
     fullRange: !!grade.fullRange,
   };
@@ -290,6 +380,7 @@ function spawnMonster(kind) {
     id: state.monsterSeq, kind, hp, maxHp: hp, speed,
     trackPos, lane, x: p.x, y: p.y,
     slowUntil: 0, slowFactor: 1, debuffUntil: 0, debuffAtkTakenMult: 1,
+    dots: [], // { dmgPerTick, ticksLeft, nextTick }
   };
   state.monsters.push(m);
   if (kind === 'boss') state.bossAliveThisWave = true;
@@ -299,7 +390,6 @@ function spawnMonster(kind) {
 function beginPrep() {
   state.phase = 'prep';
   state.prepTimer = 3;
-  state.deckLocked = true;
   document.getElementById('wavePrepOverlay').classList.remove('hidden');
 }
 
@@ -366,7 +456,6 @@ function resetRun() {
   state.placed = {};
   state.bench = [];
   state.runUpgrades = {};
-  state.deckLocked = false;
   state.selected = null;
   state.projectiles = [];
   state.particles = [];
@@ -461,8 +550,25 @@ function summonUnit() {
 }
 
 // ---------------- selection / placement / sell ----------------
-function selectBench(idx) {
-  state.selected = { kind: 'bench', idx };
+// clicking a bench card places it straight onto a random open field cell,
+// instead of the old two-step "select, then click a field cell" flow
+function placeFromBench(idx) {
+  const inst = state.bench[idx];
+  if (!inst) return;
+  const emptyCells = INTERIOR.filter(p => !state.placed[cellKey(p.c, p.r)]);
+  if (emptyCells.length === 0) {
+    log('필드에 빈 자리가 없습니다');
+    state.selected = { kind: 'bench', idx };
+    render();
+    return;
+  }
+  const cell = emptyCells[Math.floor(Math.random() * emptyCells.length)];
+  const key = cellKey(cell.c, cell.r);
+  state.bench.splice(idx, 1);
+  inst.cellKey = key;
+  inst.placedAt = performance.now();
+  state.placed[key] = inst;
+  state.selected = null;
   render();
 }
 function selectField(key) {
@@ -543,6 +649,9 @@ function dist(ax, ay, bx, by) { return Math.hypot(ax - bx, ay - by); }
 function updateSupportBuffs() {
   for (const inst of Object.values(state.placed)) inst.buffs = null;
   const supports = Object.entries(state.placed).filter(([k, inst]) => defOf(inst).base.support);
+  if (supports.length === 0) return;
+  // 연구실 아우라 노드: buff_support 트리는 서브타입 공용이라 모든 지원형 유닛에 대해 한 번만 계산하면 된다
+  const supportLab = computeLabBonus('buff_support');
   for (const [key, sInst] of supports) {
     const grade = gradeOf(sInst);
     const supportStats = computeStats(sInst); // respects enhancement/run-upgrade/deck bonuses on the buffer itself
@@ -561,9 +670,9 @@ function updateSupportBuffs() {
         tInst.buffs.atk = (tInst.buffs.atk || 0) + power;
         tInst.buffs.aspd = (tInst.buffs.aspd || 0) + power * 0.6;
         tInst.buffs.range = (tInst.buffs.range || 0) + power * 0.3;
-        tInst.buffs.critChance = (tInst.buffs.critChance || 0) + power * 0.4;
-        tInst.buffs.critDmg = (tInst.buffs.critDmg || 0) + power * 0.5;
-        tInst.buffs.bossDmg = (tInst.buffs.bossDmg || 0) + power * 0.6;
+        tInst.buffs.critChance = (tInst.buffs.critChance || 0) + power * 0.4 + supportLab.auraCritChance;
+        tInst.buffs.critDmg = (tInst.buffs.critDmg || 0) + power * 0.5 + supportLab.auraCritDmg;
+        tInst.buffs.bossDmg = (tInst.buffs.bossDmg || 0) + power * 0.6 + supportLab.auraBossDmg;
       }
     }
   }
@@ -582,16 +691,138 @@ function findTargets(center, statsObj, count) {
   return inRange.slice(0, count);
 }
 
+// caps on transient VFX arrays: with splash/DoT/extra-attack now able to fire several
+// damage instances per frame (especially against the monster cluster near the nest),
+// uncapped growth here was a real source of frame drops during heavy combat
+const MAX_FLOATING_TEXTS = 90;
+const MAX_PARTICLES = 240;
+const MAX_PROJECTILES = 150;
+
+// applying the same status again while it's already active refreshes/strengthens it
+// instead of stacking a duplicate, independent instance of the same effect
+function applySlow(m, factor, untilTs) {
+  const now = performance.now();
+  if (now >= m.slowUntil || factor <= m.slowFactor) m.slowFactor = factor; // stronger (lower) or a fresh application wins
+  m.slowUntil = Math.max(m.slowUntil, untilTs);
+}
+function applyDebuffMult(m, mult, untilTs) {
+  const now = performance.now();
+  if (now >= m.debuffUntil || mult >= m.debuffAtkTakenMult) m.debuffAtkTakenMult = mult; // stronger or fresh wins
+  m.debuffUntil = Math.max(m.debuffUntil, untilTs);
+}
+function applyDot(m, dmgPerTick) {
+  if (m.dots.length > 0) {
+    // refresh the existing stack rather than piling on a second copy of the same DoT
+    const existing = m.dots[0];
+    existing.dmgPerTick = Math.max(existing.dmgPerTick, dmgPerTick);
+    existing.ticksLeft = 3;
+    existing.nextTick = performance.now() + 900;
+    return;
+  }
+  m.dots.push({ dmgPerTick, ticksLeft: 3, nextTick: performance.now() + 900 });
+}
+function applyAllyBuff(atkPct, aspdPct, untilTs) {
+  const now = performance.now();
+  if (state.allyBuff && now < state.allyBuff.until) {
+    state.allyBuff.atkPct = Math.max(state.allyBuff.atkPct, atkPct);
+    state.allyBuff.aspdPct = Math.max(state.allyBuff.aspdPct, aspdPct);
+    state.allyBuff.until = Math.max(state.allyBuff.until, untilTs);
+  } else {
+    state.allyBuff = { until: untilTs, atkPct, aspdPct };
+  }
+}
+
 function dealDamage(m, amount, isCrit) {
   m.hp -= amount;
-  state.floatingTexts.push({
-    x: m.x + (Math.random() * 14 - 7), y: m.y - 18, t: 0, dur: isCrit ? 0.9 : 0.6,
-    value: Math.round(amount), crit: isCrit,
-  });
+  if (state.floatingTexts.length < MAX_FLOATING_TEXTS) {
+    state.floatingTexts.push({
+      x: m.x + (Math.random() * 14 - 7), y: m.y - 18, t: 0, dur: isCrit ? 0.9 : 0.6,
+      value: Math.round(amount), crit: isCrit,
+    });
+  }
+}
+
+// resolves one attack instance against one target: crit roll, boss/normal/debuff
+// modifiers, the hit itself, then any on-hit 연구실 procs (splash, poison/DoT)
+function resolveHit(m, inst, stats, center) {
+  const now = performance.now();
+  const crit = Math.random() * 100 < stats.critChance;
+  let dmg = stats.atk * (crit ? (1 + stats.critDmg / 100) : 1);
+  if ((m.kind === 'boss' || m.kind === 'mid') && stats.bossDmg) dmg *= (1 + stats.bossDmg / 100);
+  if (m.kind === 'normal' && stats.normalDmgPct) dmg *= (1 + stats.normalDmgPct / 100);
+  if (now < m.debuffUntil) dmg *= m.debuffAtkTakenMult; // debuff-type units mark targets to take extra damage
+  dealDamage(m, dmg, crit);
+  if (state.projectiles.length < MAX_PROJECTILES) {
+    state.projectiles.push({ x1: center.x, y1: center.y, x2: m.x, y2: m.y, t: 0, dur: 0.15, color: crit ? '#bd9530' : '#4a72d6' });
+  }
+  spawnHitParticles(m.x, m.y, crit ? '#bd9530' : '#4a72d6', crit ? 6 : 3);
+  if (stats.cc) applySlow(m, Math.max(0.35, 1 - stats.slow / 100 - 0.3), now + 1500);
+  if (stats.debuff) applyDebuffMult(m, 1.25 + stats.debuffPct / 100, now + 2000);
+
+  // 여파 (연구실): 주변 대상에게도 감소된 피해
+  if (stats.splashPct > 0) {
+    for (const other of state.monsters) {
+      if (other === m) continue;
+      if (dist(m.x, m.y, other.x, other.y) <= 55) {
+        dealDamage(other, dmg * stats.splashPct / 100, false);
+        spawnHitParticles(other.x, other.y, '#c17a41', 3);
+      }
+    }
+  }
+  // 도트 계열 (연구실): 확률로 중독/화상/출혈 등 지속피해 부여 (같은 효과는 중복 대신 갱신됨)
+  if (stats.dotChance > 0 && Math.random() * 100 < stats.dotChance) {
+    applyDot(m, stats.atk * 0.4);
+  }
+}
+
+// 지속피해(DoT) 처리: 0.9초 간격으로 3회 틱
+function tickDots(dt) {
+  const now = performance.now();
+  for (const m of state.monsters) {
+    if (!m.dots || m.dots.length === 0) continue;
+    m.dots = m.dots.filter(d => {
+      if (now >= d.nextTick) {
+        dealDamage(m, d.dmgPerTick, false);
+        d.nextTick += 900;
+        d.ticksLeft--;
+      }
+      return d.ticksLeft > 0;
+    });
+  }
+}
+
+// 연구실 capstone 스킬: 카드 등급과 무관하게 발동하는 서브타입 전용 궁극기
+function triggerLabActiveSkill(inst, def, stats, center, capstoneLvl) {
+  const node = LAB_TREES[def.subKey].find(n => n.id === 'capstone');
+  const now = performance.now();
+  const dmgMult = 1 + node.perLevel * capstoneLvl;
+  // no toast/shake here on purpose: once several units have their capstone skill,
+  // a text popup or screen shake per activation would fire constantly and feel like spam.
+  // the particle burst is enough local feedback without disrupting the whole screen.
+  spawnHitParticles(center.x, center.y, '#4a72d6', 12);
+
+  if (node.activeKind === 'ally') {
+    applyAllyBuff(15 + capstoneLvl * 2, 12 + capstoneLvl, now + 5000);
+    return;
+  }
+  const inRange = state.monsters.filter(m => stats.fullRange || dist(center.x, center.y, m.x, m.y) <= stats.range * CELL);
+  if (inRange.length === 0) return;
+
+  if (node.activeKind === 'single') {
+    inRange.sort((a, b) => dist(center.x, center.y, a.x, a.y) - dist(center.x, center.y, b.x, b.y));
+    dealDamage(inRange[0], stats.atk * dmgMult, true);
+  } else if (node.activeKind === 'aoe') {
+    for (const m of inRange) dealDamage(m, stats.atk * dmgMult, true);
+  } else if (node.activeKind === 'freeze') {
+    for (const m of inRange) { dealDamage(m, stats.atk * dmgMult, false); applySlow(m, 0.05, now + 2500); }
+  } else if (node.activeKind === 'curse') {
+    for (const m of inRange) { dealDamage(m, stats.atk * dmgMult, false); applyDebuffMult(m, 1.6, now + 3000); }
+  }
 }
 
 function spawnHitParticles(x, y, color, count) {
-  for (let i = 0; i < count; i++) {
+  if (state.particles.length >= MAX_PARTICLES) return;
+  for (let i = 0; i < count && state.particles.length < MAX_PARTICLES; i++) {
     const ang = Math.random() * Math.PI * 2;
     const spd = 40 + Math.random() * 90;
     state.particles.push({
@@ -601,32 +832,103 @@ function spawnHitParticles(x, y, color, count) {
   }
 }
 
+// 레전더리/미스틱 카드 전용 자동 스킬. 유닛의 서브타입 특성에 맞춰 서로 다른 효과를 낸다.
+function triggerLegendarySkill(inst, def, stats, center) {
+  const skill = LEGENDARY_SKILLS[def.subKey];
+  if (!skill) return;
+  const now = performance.now();
+  const dmgMult = (skill.dmgMult || 0) * (1 + stats.skillDmgPct / 100);
+  // same reasoning as the lab capstone skill: no toast/shake per activation, or a
+  // field full of legendary units would spam a notification every few seconds
+  spawnHitParticles(center.x, center.y, '#c1465f', 14);
+
+  if (def.subKey === 'buff_support') {
+    // temporary field-wide buff for every placed unit, read live in computeStats
+    applyAllyBuff(25 + stats.skillDmgPct * 0.4, 20, now + 5000);
+    return;
+  }
+
+  const inRange = state.monsters.filter(m => stats.fullRange || dist(center.x, center.y, m.x, m.y) <= stats.range * CELL);
+  if (inRange.length === 0) return;
+
+  if (def.subKey === 'atk_single' || def.subKey === 'ranged_single') {
+    // single target burst (ranged hits a few in a line, single-target hits the nearest)
+    inRange.sort((a, b) => dist(center.x, center.y, a.x, a.y) - dist(center.x, center.y, b.x, b.y));
+    const hitCount = def.subKey === 'ranged_single' ? 3 : 1;
+    for (const m of inRange.slice(0, hitCount)) {
+      dealDamage(m, stats.atk * dmgMult, true);
+      spawnHitParticles(m.x, m.y, '#c1465f', 8);
+    }
+  } else if (def.subKey === 'atk_multi' || def.subKey === 'magic_multi') {
+    for (const m of inRange) {
+      dealDamage(m, stats.atk * dmgMult, true);
+    }
+  } else if (def.subKey === 'magic_ctrl') {
+    for (const m of inRange) {
+      dealDamage(m, stats.atk * dmgMult, true);
+      applySlow(m, 0.05, now + 2500);
+    }
+  } else if (def.subKey === 'buff_debuff') {
+    for (const m of inRange) {
+      dealDamage(m, stats.atk * dmgMult, false);
+      applyDebuffMult(m, 1.6 + stats.debuffPct / 100, now + 3000);
+    }
+  }
+}
+
 function tickCombat(dt) {
   updateSupportBuffs();
   const now = performance.now();
   for (const [key, inst] of Object.entries(state.placed)) {
     const def = defOf(inst);
-    if (def.base.support) continue; // support units don't attack
     const stats = computeStats(inst);
-    inst.cooldown -= dt;
-    if (inst.cooldown > 0) continue;
     const [c, r] = key.split(',').map(Number);
     const center = cellCenter(c, r);
-    const targets = findTargets(center, stats, stats.targets);
-    if (targets.length === 0) continue;
-    inst.cooldown = 1 / Math.max(0.1, stats.aspd);
-    for (const m of targets) {
-      const crit = Math.random() * 100 < stats.critChance;
-      let dmg = stats.atk * (crit ? (1 + stats.critDmg / 100) : 1);
-      if ((m.kind === 'boss' || m.kind === 'mid') && stats.bossDmg) dmg *= (1 + stats.bossDmg / 100);
-      if (now < m.debuffUntil) dmg *= m.debuffAtkTakenMult; // debuff-type units mark targets to take extra damage
-      dealDamage(m, dmg, crit);
-      state.projectiles.push({ x1: center.x, y1: center.y, x2: m.x, y2: m.y, t: 0, dur: 0.15, color: crit ? '#bd9530' : '#4a72d6' });
-      spawnHitParticles(m.x, m.y, crit ? '#bd9530' : '#4a72d6', crit ? 6 : 3);
-      if (stats.cc) { m.slowFactor = Math.max(0.35, 1 - stats.slow / 100 - 0.3); m.slowUntil = performance.now() + 1500; }
-      if (stats.debuff) { m.debuffAtkTakenMult = 1.25; m.debuffUntil = performance.now() + 2000; }
+
+    if (!def.base.support) {
+      inst.cooldown -= dt;
+      const interval = 1 / Math.max(0.1, stats.aspd);
+      // loop (capped) rather than a single if-check: at high game-speed multipliers a
+      // single frame's dt can cover several of a fast unit's attack intervals, and only
+      // ever allowing one attack per frame silently capped DPS well below what the
+      // unit's stats promise. Capped at 30 to avoid a pathological catch-up spiral.
+      let swings = 0;
+      while (inst.cooldown <= 0 && swings < 30) {
+        const targets = findTargets(center, stats, stats.targets);
+        if (targets.length === 0) { inst.cooldown = 0; break; }
+        inst.cooldown += interval;
+        swings++;
+        for (const m of targets) {
+          resolveHit(m, inst, stats, center);
+          // 추가 타격 (연구실): 확률로 사거리 내 다른 대상에게 한 번 더 공격
+          if (stats.extraAtkChance > 0 && Math.random() * 100 < stats.extraAtkChance) {
+            const others = findTargets(center, stats, targets.length + 1).filter(x => x !== m);
+            if (others.length > 0) resolveHit(others[0], inst, stats, center);
+          }
+        }
+      }
+    }
+
+    // 레전더리/미스틱 등급 카드는 일정 주기마다 자동으로 특수 스킬을 발동 (지원형 포함)
+    if (def.tierId === 'legendary' || def.tierId === 'mystic') {
+      inst.skillCooldown -= dt;
+      if (inst.skillCooldown <= 0) {
+        inst.skillCooldown += SKILL_INTERVAL;
+        triggerLegendarySkill(inst, def, stats, center);
+      }
+    }
+
+    // 연구실 capstone 노드: 카드 등급과 무관하게, 해당 서브타입 트리를 끝까지 투자하면 열리는 전용 스킬
+    const capstoneLvl = labNodeLevel(def.subKey, 'capstone');
+    if (capstoneLvl > 0) {
+      inst.labSkillCooldown = (inst.labSkillCooldown ?? LAB_ACTIVE_INTERVAL) - dt;
+      if (inst.labSkillCooldown <= 0) {
+        inst.labSkillCooldown += LAB_ACTIVE_INTERVAL;
+        triggerLabActiveSkill(inst, def, stats, center, capstoneLvl);
+      }
     }
   }
+  tickDots(dt);
   state.monsters = state.monsters.filter(m => {
     if (m.hp <= 0) {
       onMonsterKilled(m);
@@ -640,14 +942,14 @@ function onMonsterKilled(m) {
   const burstColor = m.kind === 'boss' ? '#c1465f' : m.kind === 'mid' ? '#c17a41' : '#b8657a';
   spawnHitParticles(m.x, m.y, burstColor, m.kind === 'boss' ? 22 : m.kind === 'mid' ? 14 : 7);
   if (m.kind === 'mid') {
-    if (Math.random() < 0.35) { state.gems += 1; log('중간보스 처치! 특수재화 +1'); pulseStat(HUD.gemStat); }
+    if (Math.random() < 0.35) { state.gems += 1; log('중간보스 처치! 특수재화 +1'); pulseStat(HUD.collGemStat); }
     shakeScreen(4);
   } else if (m.kind === 'boss') {
     state.bossAliveThisWave = false; // boss defeated in time -> wave can now clear normally
     const g = 2 + Math.floor(Math.random() * 3);
     state.gems += g;
     log(`보스 처치! 특수재화 +${g}`);
-    pulseStat(HUD.gemStat);
+    pulseStat(HUD.collGemStat);
     shakeScreen(8);
   }
 }
@@ -708,6 +1010,8 @@ function loop(now) {
 }
 
 // ---------------- rendering (canvas) ----------------
+const gradePillWidthCache = {};
+
 function roundRectPath(ctx2, x, y, w, h, radius) {
   ctx2.beginPath();
   ctx2.moveTo(x + radius, y);
@@ -730,13 +1034,13 @@ function draw() {
 
   // outer track (monsters loop around the border, outside the placement grid)
   ctx.lineWidth = TRACK_GAP * 1.5;
-  ctx.strokeStyle = '#f5ecd8';
+  ctx.strokeStyle = '#eef1fa';
   ctx.beginPath();
   ctx.rect(TRACK_CORNERS[0].x, TRACK_CORNERS[0].y, TRACK_CORNERS[2].x - TRACK_CORNERS[0].x, TRACK_CORNERS[2].y - TRACK_CORNERS[0].y);
   ctx.stroke();
   ctx.lineWidth = 1.5;
   ctx.setLineDash([5, 5]);
-  ctx.strokeStyle = 'rgba(193,122,65,0.32)';
+  ctx.strokeStyle = 'rgba(74,114,214,0.3)';
   ctx.stroke();
   ctx.setLineDash([]);
 
@@ -838,7 +1142,10 @@ function draw() {
     const pillY = y + BADGE_R + 10;
     ctx.font = '800 9px sans-serif';
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    const pillW = ctx.measureText(inst.grade).width + 12;
+    // only 8 possible grade strings ever appear here, so cache their measured width
+    // instead of re-running ctx.measureText for every placed unit on every frame
+    if (!(inst.grade in gradePillWidthCache)) gradePillWidthCache[inst.grade] = ctx.measureText(inst.grade).width + 12;
+    const pillW = gradePillWidthCache[inst.grade];
     roundRectPath(ctx, x - pillW / 2, pillY - 7, pillW, 14, 7);
     ctx.fillStyle = grade.color;
     ctx.fill();
@@ -960,6 +1267,7 @@ function showScreen(name) {
   document.getElementById('homeScreen').classList.toggle('hidden', name !== 'home');
   document.getElementById('gameScreen').classList.toggle('hidden', name !== 'game');
   document.getElementById('collectionScreen').classList.toggle('hidden', name !== 'collection');
+  document.getElementById('labScreen').classList.toggle('hidden', name !== 'lab');
   window.scrollTo(0, 0);
   render();
 }
@@ -968,11 +1276,10 @@ let lastGold = state.gold, lastGems = state.gems, lastCoin = state.cardCoin;
 function syncCurrencyDisplays() {
   const goldNow = Math.floor(state.gold);
   HUD.gold.textContent = goldNow;
-  HUD.gem.textContent = state.gems;
   if (HUD.collGem) HUD.collGem.textContent = state.gems;
   if (HUD.collCoin) HUD.collCoin.textContent = state.cardCoin;
   if (goldNow > lastGold) pulseStat(HUD.goldStat);
-  if (state.gems > lastGems) { pulseStat(HUD.gemStat); pulseStat(HUD.collGemStat); }
+  if (state.gems > lastGems) pulseStat(HUD.collGemStat);
   if (state.cardCoin > lastCoin) pulseStat(HUD.collCoinStat);
   lastGold = goldNow; lastGems = state.gems; lastCoin = state.cardCoin;
 }
@@ -982,6 +1289,7 @@ function render() {
   if (state.screen === 'home') renderHome();
   if (state.screen === 'game') renderGame();
   if (state.screen === 'collection') renderCollectionScreen();
+  if (state.screen === 'lab') renderLabScreen();
   if (typeof scheduleCloudSave === 'function') scheduleCloudSave();
 }
 
@@ -1001,6 +1309,8 @@ function updateHud() {
   // early warning before the 50-monster instant game-over, mirroring the boss-timer urgency cue
   HUD.swarmStat.classList.toggle('urgent', state.monsters.length >= 40);
   syncCurrencyDisplays();
+  const summonBtn = document.getElementById('summonBtn');
+  if (summonBtn) summonBtn.disabled = state.gold < 10 || state.activeDeck.length === 0 || state.phase === 'gameover';
 }
 
 function renderGame() {
@@ -1016,14 +1326,14 @@ function renderGame() {
     div.style.borderColor = grade.color;
     div.style.boxShadow = `0 0 0 1px ${hexToRgba(grade.color, 0.25)}, 0 0 14px ${hexToRgba(grade.color, isHigh ? 0.45 : 0.2)}`;
     div.innerHTML = unitCardHtml(inst);
-    div.onclick = () => selectBench(idx);
+    div.onclick = () => placeFromBench(idx);
     bench.appendChild(div);
   });
 
   const gdl = document.getElementById('gameDeckList');
   gdl.innerHTML = '';
   state.activeDeck.forEach(defId => {
-    const def = UNIT_DEFS.find(d => d.id === defId);
+    const def = UNIT_DEFS_BY_ID[defId];
     const tier = TIERS.find(t => t.id === def.tierId);
     const rl = state.runUpgrades[defId] || 0;
     const cost = runUpgradeCost(rl);
@@ -1073,8 +1383,6 @@ function renderGame() {
     } else { selEl.innerHTML = ''; sellBtn.disabled = true; }
   } else { selEl.innerHTML = ''; sellBtn.disabled = true; }
 
-  document.getElementById('summonBtn').disabled = state.gold < 10 || state.activeDeck.length === 0 || state.phase === 'gameover';
-
   document.querySelectorAll('.speedBtn').forEach(btn => {
     btn.classList.toggle('active', Number(btn.dataset.speed) === state.speedMult);
   });
@@ -1084,9 +1392,18 @@ function renderCollectionScreen() {
   document.getElementById('gachaNormalBtn').disabled = state.cardCoin < GACHA_NORMAL_COST;
   document.getElementById('gachaGemBtn').disabled = state.gems < GACHA_GEM_COST;
 
+  const locked = isRunLocked();
+  const deckFull = state.activeDeck.length >= DECK_SIZE;
+
+  const deckCountLabel = document.getElementById('deckCountLabel');
+  if (deckCountLabel) {
+    deckCountLabel.textContent = `${state.activeDeck.length}/${DECK_SIZE}`;
+    deckCountLabel.classList.toggle('full', deckFull);
+  }
+
   // deck lock notice
   const lockNotice = document.getElementById('deckLockNotice');
-  if (lockNotice) lockNotice.classList.toggle('hidden', !state.deckLocked);
+  if (lockNotice) lockNotice.classList.toggle('hidden', !locked);
 
   // deck slots
   const slots = document.getElementById('deckSlots');
@@ -1094,13 +1411,13 @@ function renderCollectionScreen() {
   for (let i = 0; i < DECK_SIZE; i++) {
     const defId = state.activeDeck[i];
     const slot = document.createElement('div');
-    slot.className = 'deckSlot' + (defId ? ' filled' : '') + (state.deckLocked ? ' locked' : '');
+    slot.className = 'deckSlot' + (defId ? ' filled' : '') + (locked ? ' locked' : '');
     if (defId) {
-      const def = UNIT_DEFS.find(d => d.id === defId);
+      const def = UNIT_DEFS_BY_ID[defId];
       const tier = TIERS.find(t => t.id === def.tierId);
       slot.style.borderColor = tier.color;
-      slot.innerHTML = `<span style="color:${tier.color}">${svgIcon(def.icon, 16)}</span><div class="cname">${def.name}</div>${state.deckLocked ? '' : `<div class="removeX">${svgIcon('x', 8)}</div>`}`;
-      if (!state.deckLocked) slot.onclick = () => toggleDeckCard(defId);
+      slot.innerHTML = `<span style="color:${tier.color}">${svgIcon(def.icon, 16)}</span><div class="cname">${def.name}</div>${locked ? '' : `<div class="removeX">${svgIcon('x', 8)}</div>`}`;
+      if (!locked) slot.onclick = () => toggleDeckCard(defId);
     } else {
       slot.innerHTML = `<span class="slotIcon">${svgIcon('plus', 16)}</span><div class="cname">빈 슬롯</div>`;
     }
@@ -1121,26 +1438,33 @@ function renderCollectionScreen() {
   list.innerHTML = '';
   const tierRank = TIERS.map(t => t.id);
   const owned = ownedDefIdList().sort((a, b) => {
-    const da = UNIT_DEFS.find(d => d.id === a), db = UNIT_DEFS.find(d => d.id === b);
+    const da = UNIT_DEFS_BY_ID[a], db = UNIT_DEFS_BY_ID[b];
     return tierRank.indexOf(db.tierId) - tierRank.indexOf(da.tierId);
   });
   owned.forEach(defId => {
-    const def = UNIT_DEFS.find(d => d.id === defId);
+    const def = UNIT_DEFS_BY_ID[defId];
     const tier = TIERS.find(t => t.id === def.tierId);
     const entry = state.collection[defId];
     const req = enhanceRequirement(entry.level);
     const canEnhance = entry.level < ENHANCE_MAX_LEVEL && entry.count >= req;
     const isHighTier = tier.id === 'legendary' || tier.id === 'mystic';
     const inDeck = state.activeDeck.includes(defId);
+    const unaddable = !inDeck && deckFull && !locked;
     const div = document.createElement('div');
-    div.className = 'collCard' + (isHighTier ? ' foil' : '') + (inDeck ? ' inDeck' : '') + (state.deckLocked ? ' locked' : '');
+    div.className = 'collCard' + (isHighTier ? ' foil' : '') + (inDeck ? ' inDeck' : '') + (locked ? ' locked' : '') + (unaddable ? ' unaddable' : '');
     div.style.borderColor = tier.color;
     div.style.boxShadow = `0 0 0 1px ${hexToRgba(tier.color, 0.2)}, 0 0 16px ${hexToRgba(tier.color, isHighTier ? 0.4 : 0.15)}`;
+    const stats = previewCardStats(defId);
     div.innerHTML = `
       ${inDeck ? '<div class="deckBadge">덱 등록됨</div>' : ''}
       <div class="collIcon" style="color:${tier.color}">${svgIcon(def.icon, 30)}</div>
       <div class="collName" style="color:${tier.color}">${def.name}</div>
       <div class="collSub">${SUBTYPES[def.subKey].name}</div>
+      <div class="collStats">
+        <div><small>공격</small><b>${stats.atk.toFixed(1)}</b></div>
+        <div><small>사거리</small><b>${stats.range.toFixed(2)}</b></div>
+        <div><small>공속</small><b>${stats.aspd.toFixed(2)}</b></div>
+      </div>
       <div class="collRow">보유 <b>${entry.count}</b>장 &nbsp;Lv.${entry.level}${entry.level >= ENHANCE_MAX_LEVEL ? ' (MAX)' : ''}</div>
       <button class="enhanceBtn" ${canEnhance ? '' : 'disabled'}>${entry.level >= ENHANCE_MAX_LEVEL ? '최대 강화' : `강화 (${entry.count}/${req})`}</button>
     `;
@@ -1150,6 +1474,76 @@ function renderCollectionScreen() {
     });
     div.querySelector('.enhanceBtn').onclick = (e) => { e.stopPropagation(); enhanceCard(defId); };
     list.appendChild(div);
+  });
+}
+
+const LAB_EFFECT_LABELS = {
+  atkPct: '공격력', aspdPct: '공격속도', critChanceAdd: '치명타 확률',
+  slowAdd: '둔화 강도', debuffPct: '저주 강도', rangePct: '사거리', skillDmgPct: '스킬 위력',
+  normalDmgPct: '일반 몬스터 피해', bossDmgPct: '보스 피해', splashPct: '스플래시 피해',
+  dotChance: '도트 확률', extraAtkChance: '추가 공격 확률',
+  auraCritChance: '아군 치명타 확률(오라)', auraCritDmg: '아군 치명타 피해(오라)', auraBossDmg: '아군 보스 피해(오라)',
+};
+const LAB_ACTIVE_KIND_LABEL = { single: '단일 강타', aoe: '광역 폭발', freeze: '광역 빙결', curse: '광역 저주', ally: '전군 버프' };
+
+function renderLabScreen() {
+  const subKey = state.labSelectedSub;
+  const tokens = state.labTokens[subKey] || 0;
+  const subInfo = SUBTYPES[subKey];
+
+  document.getElementById('labTokenLabel').textContent = tokens;
+  document.getElementById('labTokenSubLabel').textContent = `${subInfo.name} 토큰`;
+
+  // subtype selector tabs
+  const tabWrap = document.getElementById('labSubTabs');
+  tabWrap.innerHTML = '';
+  Object.keys(LAB_TREES).forEach(sk => {
+    const info = SUBTYPES[sk];
+    const btn = document.createElement('button');
+    btn.className = 'labTab' + (sk === subKey ? ' active' : '');
+    btn.innerHTML = `${svgIcon(info.icon, 16)}<span>${info.name}</span>`;
+    btn.onclick = () => { state.labSelectedSub = sk; render(); };
+    tabWrap.appendChild(btn);
+  });
+
+  // skill tree for the selected subtype: root -> branchA/branchB -> leafA/leafB -> capstone
+  const grid = document.getElementById('labTreeGrid');
+  grid.innerHTML = '';
+  const tree = LAB_TREES[subKey];
+  const rows = [['root'], ['branchA', 'branchB'], ['leafA', 'leafB'], ['capstone']];
+  rows.forEach(rowIds => {
+    const rowEl = document.createElement('div');
+    rowEl.className = 'labRow';
+    rowIds.forEach(nodeId => {
+      const node = tree.find(n => n.id === nodeId);
+      if (!node) return;
+      const level = labNodeLevel(subKey, nodeId);
+      const unlocked = labNodeUnlocked(subKey, node);
+      const cost = labNodeCost(level);
+      const canAfford = unlocked && tokens >= cost;
+      const isActive = node.type === 'active';
+      const card = document.createElement('div');
+      card.className = 'labNode' + (isActive ? ' skillNode' : '') + (unlocked ? '' : ' locked') + (level > 0 ? ' active' : '');
+      let effectLine;
+      if (isActive) {
+        effectLine = level > 0
+          ? `${LAB_ACTIVE_KIND_LABEL[node.activeKind]} · ${LAB_ACTIVE_INTERVAL}초마다`
+          : `${node.requires.level}레벨 필요 (미해금 스킬)`;
+      } else {
+        const effectLabel = LAB_EFFECT_LABELS[node.effectKey] || node.effectKey;
+        effectLine = `${effectLabel} +${(node.perLevel * Math.max(level, 1)).toFixed(1)}${level === 0 ? ' (다음)' : ''}`;
+      }
+      card.innerHTML = `
+        <div class="labNodeIcon">${svgIcon(unlocked ? node.icon : 'lock', 20)}</div>
+        <div class="labNodeName">${node.name}${isActive ? ' <span class="labSkillTag">스킬</span>' : ''}</div>
+        <div class="labNodeEffect">${effectLine}</div>
+        <div class="labNodeLevel">Lv.${level}</div>
+        <button class="labNodeBtn" ${canAfford ? '' : 'disabled'}>${unlocked ? `강화 (${cost} 토큰)` : `Lv.${node.requires.level} 필요`}</button>
+      `;
+      card.querySelector('.labNodeBtn').onclick = () => upgradeLabNode(subKey, nodeId);
+      rowEl.appendChild(card);
+    });
+    grid.appendChild(rowEl);
   });
 }
 
@@ -1179,6 +1573,7 @@ document.getElementById('gachaNormalBtn').onclick = gachaNormal;
 document.getElementById('gachaGemBtn').onclick = gachaGem;
 document.getElementById('startBtn').onclick = () => {
   document.getElementById('startRow').classList.add('hidden');
+  state.gold = 50; // the real run-start reset: whatever was spent/left over before this click doesn't matter
   state.bench = [];
   state.selected = null;
   beginPrep();
@@ -1196,6 +1591,10 @@ document.getElementById('gameHomeBtn').onclick = () => showScreen('home');
 document.getElementById('gotoCollectionBtn').onclick = () => showScreen('collection');
 document.getElementById('collHomeBtn').onclick = () => showScreen('home');
 document.getElementById('collGameBtn').onclick = () => showScreen('game');
+document.getElementById('goLabBtn').onclick = () => showScreen('lab');
+document.getElementById('collLabBtn').onclick = () => showScreen('lab');
+document.getElementById('labHomeBtn').onclick = () => showScreen('home');
+document.getElementById('labCollBtn').onclick = () => showScreen('collection');
 
 // ---------------- init ----------------
 function applyStaticIcons() {
