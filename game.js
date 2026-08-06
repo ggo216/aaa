@@ -103,6 +103,7 @@ const state = {
   masteryPoints: 0, // 공용 마스터리: universal points (also +2 per card level-up), usable on ANY subtype's tree
   labProgress: {}, // subKey -> { nodeId -> level }, persistent, benefits every card of that subtype
   labSelectedSub: 'atk_single',
+  bulkSellMaxGrade: BULK_SELL_MAX_GRADE, // player-adjustable in-run via the grade picker next to 일괄 판매; defaults to the same 'A' ceiling as before
   allyBuff: null, // { until, atkPct, aspdPct } set by a buff_support legendary skill activation
   instSeq: 0,
   selected: null, // {kind:'bench', idx} | {kind:'field', key}
@@ -845,7 +846,7 @@ function sellBenchUnit(idx) {
 
 function bulkSell() {
   const rank = GRADES.map(g => g.id);
-  const maxIdx = rank.indexOf(BULK_SELL_MAX_GRADE);
+  const maxIdx = rank.indexOf(state.bulkSellMaxGrade);
   let gained = 0;
   state.bench = state.bench.filter(inst => {
     if (rank.indexOf(inst.grade) <= maxIdx) { gained += GRADE_SELL_PRICE[inst.grade]; return false; }
@@ -2542,6 +2543,15 @@ canvas.addEventListener('click', (e) => {
 document.getElementById('summonBtn').onclick = summonUnit;
 document.getElementById('sellBtn').onclick = sellSelected;
 document.getElementById('bulkSellBtn').onclick = bulkSell;
+// grade picker for 일괄 판매's threshold — built once here (options never change),
+// its selected value drives state.bulkSellMaxGrade which bulkSell() reads live
+(function setupBulkSellGradePicker() {
+  const sel = document.getElementById('bulkSellGrade');
+  if (!sel) return;
+  sel.innerHTML = GRADES.map(g => `<option value="${g.id}">${g.id} 이하</option>`).join('');
+  sel.value = state.bulkSellMaxGrade;
+  sel.onchange = () => { state.bulkSellMaxGrade = sel.value; };
+})();
 document.getElementById('gachaNormalBtn').onclick = gachaNormal;
 document.getElementById('gachaGemBtn').onclick = gachaGem;
 document.getElementById('gachaBulkNormalBtn').onclick = gachaBulkNormal;

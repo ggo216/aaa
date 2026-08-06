@@ -258,8 +258,14 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .sellRow { font-size: 11px; color: var(--text-faint); font-weight: 600; }
 .sellRow b { color: var(--text); font-weight: 800; }
 .lvlTag { color: var(--accent); font-weight: 800; background: var(--accent-soft); padding: 1px 6px; border-radius: 6px; font-size: 11px; }
-.selActions { margin-top: 10px; display: flex; gap: 6px; }
-.selActions button { flex: 1; }
+.selActions { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+.selActions button { flex: 1; min-width: 64px; }
+/* the grade picker isn't an action itself, so it doesn't stretch like the buttons —
+   just wide enough to read the grade label */
+#bulkSellGrade {
+  flex: 0 0 auto; padding: 8px 8px; font-size: 11px; font-weight: 700; background: #f0f1f5;
+  color: var(--text); border: 1px solid var(--panel-border); border-radius: var(--radius-sm);
+}
 #sellBtn { background: linear-gradient(120deg, var(--danger), #dd6b7e); color: #fff; border: none; }
 #sellBtn:hover:not(:disabled) { filter: brightness(1.05); }
 /* bulk-sell isn't the "irreversible single click" danger action sellBtn is, so it
