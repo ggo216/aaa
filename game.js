@@ -38,6 +38,18 @@ const BENCH_MAX = 5;
 function cellCenter(c, r) { return { x: MARGIN + c * CELL + CELL / 2, y: MARGIN + r * CELL + CELL / 2 }; }
 function cellKey(c, r) { return `${c},${r}`; }
 
+// assigns a placed instance's cell and caches its pixel center on the instance itself.
+// tickCombat() and draw() run for every placed unit every single tick/frame — re-parsing
+// "c,r" out of the key string (split+map, two array allocations) and recomputing a fresh
+// {x,y} object every time was a real source of GC-pressure frame spikes under sustained
+// combat (found via a max/p99 frame-time stress test). Computing it once here, only when
+// a unit actually moves, and reading the cached inst.center everywhere else fixes that.
+function placeUnitAt(inst, key) {
+  inst.cellKey = key;
+  const [c, r] = key.split(',').map(Number);
+  inst.center = cellCenter(c, r);
+}
+
 // ---------------- outer track (perimeter loop monsters march along) ----------------
 const TRACK_CORNERS = (() => {
   const x0 = MARGIN - TRACK_GAP, y0 = MARGIN - TRACK_GAP;
@@ -185,6 +197,12 @@ function tryRestoreRunSnapshot() {
     state.wave = snap.wave || 0;
     state.gold = typeof snap.gold === 'number' ? snap.gold : 50;
     state.placed = snap.placed || {};
+    // .center is a cached-at-placement-time perf optimization (see placeUnitAt()) —
+    // a snapshot saved before that existed won't have it, so re-derive it here rather
+    // than trusting every restored instance to already carry it
+    for (const [key, inst] of Object.entries(state.placed)) {
+      if (!inst.center) { const [c, r] = key.split(',').map(Number); inst.center = cellCenter(c, r); }
+    }
     state.bench = snap.bench || [];
     state.runUpgrades = snap.runUpgrades || {};
     if (snap.activeDeck) state.activeDeck = snap.activeDeck.filter(id => state.collection[id]);
@@ -378,8 +396,18 @@ function upgradeLabNode(subKey, nodeId) {
 }
 
 // aggregate bonus from every node in a subtype's tree; benefits ALL owned/placed
-// cards of that subtype regardless of their individual grade or card tier
+// cards of that subtype regardless of their individual grade or card tier.
+// computeStats() calls this once per placed unit per combat tick — with only 7
+// possible subtypes but up to 25 placed units, that's up to 25 fresh 15-key object
+// allocations/sec-at-60fps for what's often the same handful of distinct subtypes,
+// which was contributing real GC-pause frame spikes under heavy combat (found via
+// a max/p99 frame-time stress test, not just the average). Cache the result for the
+// current combat tick and reuse it across every unit of the same subtype that tick;
+// invalidated every tick via labBonusCacheTick so it can never go stale within a run.
+let labBonusCacheTick = -1;
+let labBonusCache = {};
 function computeLabBonus(subKey) {
+  if (labBonusCacheTick === combatTickId && labBonusCache[subKey]) return labBonusCache[subKey];
   const bonus = {
     atkPct: 0, aspdPct: 0, critChanceAdd: 0, slowAdd: 0, debuffPct: 0, rangePct: 0, skillDmgPct: 0,
     normalDmgPct: 0, bossDmgPct: 0, splashPct: 0, dotChance: 0, extraAtkChance: 0,
@@ -391,6 +419,8 @@ function computeLabBonus(subKey) {
     const lvl = labNodeLevel(subKey, node.id);
     if (lvl > 0 && node.effectKey in bonus) bonus[node.effectKey] += node.perLevel * lvl;
   }
+  if (labBonusCacheTick !== combatTickId) { labBonusCache = {}; labBonusCacheTick = combatTickId; }
+  labBonusCache[subKey] = bonus;
   return bonus;
 }
 
@@ -724,7 +754,7 @@ function placeFromBench(idx) {
   const cell = emptyCells[Math.floor(Math.random() * emptyCells.length)];
   const key = cellKey(cell.c, cell.r);
   state.bench.splice(idx, 1);
-  inst.cellKey = key;
+  placeUnitAt(inst, key);
   inst.placedAt = performance.now();
   state.placed[key] = inst;
   state.selected = null;
@@ -740,12 +770,13 @@ function selectField(key) {
       if (occupant) {
         state.bench.splice(cur.idx, 1);
         occupant.cellKey = null;
+        occupant.center = null;
         state.bench.push(occupant);
-        inst.cellKey = key;
+        placeUnitAt(inst, key);
         state.placed[key] = inst;
       } else {
         state.bench.splice(cur.idx, 1);
-        inst.cellKey = key;
+        placeUnitAt(inst, key);
         state.placed[key] = inst;
       }
       inst.placedAt = performance.now();
@@ -760,8 +791,8 @@ function selectField(key) {
       state.placed[cur.key] = b || null;
       state.placed[key] = a || null;
       if (!state.placed[cur.key]) delete state.placed[cur.key];
-      if (b) b.cellKey = cur.key;
-      if (a) a.cellKey = key;
+      if (b) placeUnitAt(b, cur.key);
+      if (a) placeUnitAt(a, key);
       state.selected = null;
       render();
       return;
@@ -832,15 +863,13 @@ function updateSupportBuffs() {
     const grade = gradeOf(sInst);
     const supportStats = computeStats(sInst); // respects enhancement/run-upgrade/deck bonuses on the buffer itself
     const range = supportStats.range * CELL;
-    const [c, r] = key.split(',').map(Number);
-    const center = cellCenter(c, r);
+    const center = sInst.center; // cached at placement time — see placeUnitAt()
     const lvl = levelOf(sInst.defId);
     const runLvl = state.runUpgrades[sInst.defId] || 0;
     const power = (4 + (grade.mult - 1) * 6) * (1 + lvl * ENHANCE_STAT_BONUS.atk) * (1 + runLvl * RUN_UPGRADE_STAT_BONUS.atk);
     for (const [k2, tInst] of Object.entries(state.placed)) {
       if (k2 === key) continue;
-      const [c2, r2] = k2.split(',').map(Number);
-      const p2 = cellCenter(c2, r2);
+      const p2 = tInst.center; // cached at placement time — see placeUnitAt()
       if (supportStats.fullRange || dist(center.x, center.y, p2.x, p2.y) <= range) {
         tInst.buffs = tInst.buffs || {};
         tInst.buffs.atk = (tInst.buffs.atk || 0) + power;
@@ -1298,14 +1327,15 @@ function triggerLegendarySkill(inst, def, stats, center) {
   }
 }
 
+let combatTickId = 0;
 function tickCombat(dt) {
+  combatTickId++; // bumped once per tick so computeLabBonus() can safely cache per-subtype within this tick
   updateSupportBuffs();
   const now = performance.now();
   for (const [key, inst] of Object.entries(state.placed)) {
     const def = defOf(inst);
     const stats = computeStats(inst);
-    const [c, r] = key.split(',').map(Number);
-    const center = cellCenter(c, r);
+    const center = inst.center; // cached at placement time — see placeUnitAt()
 
     if (!def.base.support) {
       inst.cooldown -= dt;
@@ -1484,6 +1514,43 @@ function loop(now) {
 // ---------------- rendering (canvas) ----------------
 const gradePillWidthCache = {};
 
+// the base field background — outer track, grid lines, cell borders — never changes
+// frame to frame (only the per-cell "occupied" tint does), yet draw() was redrawing
+// ~39 individual stroke/rect calls for it 60 times a second. Isolated stress-testing
+// showed canvas draw-call overhead (not particle/monster/unit count) was the actual
+// dominant source of remaining frame-time spikes even with the field otherwise empty,
+// so this static portion is now pre-rendered once to an offscreen canvas and just
+// blitted with a single drawImage() every frame instead.
+const bgCanvas = document.createElement('canvas');
+bgCanvas.width = canvas.width;
+bgCanvas.height = canvas.height;
+(function renderStaticBackground() {
+  const bctx = bgCanvas.getContext('2d');
+  bctx.fillStyle = '#fbfbfd';
+  bctx.fillRect(0, 0, bgCanvas.width, bgCanvas.height);
+  bctx.lineWidth = TRACK_GAP * 1.5;
+  bctx.strokeStyle = '#eef1fa';
+  bctx.beginPath();
+  bctx.rect(TRACK_CORNERS[0].x, TRACK_CORNERS[0].y, TRACK_CORNERS[2].x - TRACK_CORNERS[0].x, TRACK_CORNERS[2].y - TRACK_CORNERS[0].y);
+  bctx.stroke();
+  bctx.lineWidth = 1.5;
+  bctx.setLineDash([5, 5]);
+  bctx.strokeStyle = 'rgba(74,114,214,0.3)';
+  bctx.stroke();
+  bctx.setLineDash([]);
+  for (let i = 0; i <= GRID; i++) {
+    bctx.strokeStyle = '#e2e4ea';
+    bctx.lineWidth = 1;
+    bctx.beginPath(); bctx.moveTo(MARGIN + i * CELL, MARGIN); bctx.lineTo(MARGIN + i * CELL, MARGIN + GRID * CELL); bctx.stroke();
+    bctx.beginPath(); bctx.moveTo(MARGIN, MARGIN + i * CELL); bctx.lineTo(MARGIN + GRID * CELL, MARGIN + i * CELL); bctx.stroke();
+  }
+  for (const p of INTERIOR) {
+    bctx.strokeStyle = '#dfe2ea';
+    bctx.lineWidth = 1;
+    bctx.strokeRect(MARGIN + p.c * CELL + 2, MARGIN + p.r * CELL + 2, CELL - 4, CELL - 4);
+  }
+})();
+
 function roundRectPath(ctx2, x, y, w, h, radius) {
   ctx2.beginPath();
   ctx2.moveTo(x + radius, y);
@@ -1501,39 +1568,16 @@ function draw() {
     ctx.translate((Math.random() * 2 - 1) * m, (Math.random() * 2 - 1) * m);
   }
   ctx.clearRect(-20, -20, canvas.width + 40, canvas.height + 40);
-  ctx.fillStyle = '#fbfbfd';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  // static background (track/grid/cell borders) — pre-rendered once, see bgCanvas above
+  ctx.drawImage(bgCanvas, 0, 0);
 
-  // outer track (monsters loop around the border, outside the placement grid)
-  ctx.lineWidth = TRACK_GAP * 1.5;
-  ctx.strokeStyle = '#eef1fa';
-  ctx.beginPath();
-  ctx.rect(TRACK_CORNERS[0].x, TRACK_CORNERS[0].y, TRACK_CORNERS[2].x - TRACK_CORNERS[0].x, TRACK_CORNERS[2].y - TRACK_CORNERS[0].y);
-  ctx.stroke();
-  ctx.lineWidth = 1.5;
-  ctx.setLineDash([5, 5]);
-  ctx.strokeStyle = 'rgba(74,114,214,0.3)';
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  // placement cells (all 25 are placeable)
-  for (const p of INTERIOR) {
-    const key = cellKey(p.c, p.r);
-    ctx.fillStyle = state.placed[key] ? '#eaf0ff' : '#ffffff';
-    ctx.fillRect(MARGIN + p.c * CELL + 2, MARGIN + p.r * CELL + 2, CELL - 4, CELL - 4);
-  }
-  // grid lines
-  for (let i = 0; i <= GRID; i++) {
-    ctx.strokeStyle = '#e2e4ea';
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(MARGIN + i * CELL, MARGIN); ctx.lineTo(MARGIN + i * CELL, MARGIN + GRID * CELL); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(MARGIN, MARGIN + i * CELL); ctx.lineTo(MARGIN + GRID * CELL, MARGIN + i * CELL); ctx.stroke();
-  }
-  // rounded borders on interior slots
-  for (const p of INTERIOR) {
-    ctx.strokeStyle = '#dfe2ea';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(MARGIN + p.c * CELL + 2, MARGIN + p.r * CELL + 2, CELL - 4, CELL - 4);
+  // only the per-cell "occupied" tint is dynamic; the border under it is already baked
+  // into bgCanvas, so this only needs a fill, not a fill+stroke, and only for occupied
+  // cells (rather than looping and re-filling all 25 every frame)
+  for (const key of Object.keys(state.placed)) {
+    const [pc, pr] = key.split(',').map(Number);
+    ctx.fillStyle = '#eaf0ff';
+    ctx.fillRect(MARGIN + pc * CELL + 2, MARGIN + pr * CELL + 2, CELL - 4, CELL - 4);
   }
 
   // lingering zone effects (fire/plague), drawn under units/monsters
@@ -1636,8 +1680,7 @@ function draw() {
   // placed units
   const BADGE_R = 17; // unit icon circle radius, kept well clear of the CELL slot
   for (const [key, inst] of Object.entries(state.placed)) {
-    const [c, r] = key.split(',').map(Number);
-    const { x, y } = cellCenter(c, r);
+    const { x, y } = inst.center; // cached at placement time — see placeUnitAt()
     const def = defOf(inst);
     const grade = gradeOf(inst);
     const lvl = levelOf(inst.defId);
@@ -2393,6 +2436,10 @@ function flushSaves() {
   clearTimeout(saveTimer);
   saveLocalProgress();
   saveRunSnapshot();
+  // best-effort — a network write isn't guaranteed to land before the tab is actually
+  // killed, which is exactly why loadCloudProgress() now merges instead of overwrites
+  // (see cloud.js) rather than relying on this alone
+  if (typeof saveCloudProgress === 'function') saveCloudProgress();
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushSaves(); });
 window.addEventListener('pagehide', flushSaves);
