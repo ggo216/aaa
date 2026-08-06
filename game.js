@@ -33,6 +33,7 @@ for (let r = 0; r < GRID; r++)
     INTERIOR.push({ c, r });
 
 const DECK_SIZE = 5;
+const BENCH_MAX = 5;
 
 function cellCenter(c, r) { return { x: MARGIN + c * CELL + CELL / 2, y: MARGIN + r * CELL + CELL / 2 }; }
 function cellKey(c, r) { return `${c},${r}`; }
@@ -87,14 +88,20 @@ const state = {
   deckBonus: {},
   runUpgrades: {}, // defId -> level; gold-funded, in-run only, resets on reload/restart
   labTokens: {}, // subKey -> token count, earned 2 per card enhancement level-up
+  masteryPoints: 0, // 공용 마스터리: universal points (also +2 per card level-up), usable on ANY subtype's tree
   labProgress: {}, // subKey -> { nodeId -> level }, persistent, benefits every card of that subtype
   labSelectedSub: 'atk_single',
   allyBuff: null, // { until, atkPct, aspdPct } set by a buff_support legendary skill activation
   instSeq: 0,
   selected: null, // {kind:'bench', idx} | {kind:'field', key}
+  selectedAt: 0, // timestamp of the last selection change, for a quick range-indicator fade-in
   projectiles: [],
   particles: [],
   floatingTexts: [],
+  zones: [], // lingering ground-effect areas (fire/plague), see spawnZone/tickZones
+  turrets: [], // temporary buff_support deployables, see spawnTurret/tickTurrets
+  rings: [], // fast expand/fade shockwave rings (atk_multi big explosion), see spawnShockRing
+  bolts: [], // jagged lightning polylines (ranged_single chain lightning), see spawnBolt
   speedMult: 1,
   bossAliveThisWave: false,
   bossKilledInTime: true,
@@ -103,6 +110,100 @@ const state = {
 function log(msg) {
   const el = document.getElementById('log');
   el.textContent = msg;
+}
+
+// ---------------- local persistence ----------------
+// previously ONLY bestWave survived a reload; everything else (collection, deck,
+// currencies, lab tokens/progress, and the in-progress run) lived purely in memory.
+// iOS Safari frequently reloads a backgrounded home-screen-bookmarked tab to reclaim
+// memory, which silently wiped all of it — this is the root cause behind "게임이
+// 초기화되는 버그" and "연구실 포인트가 사라지는 버그". Persisting to localStorage
+// (in addition to the existing cross-device cloud save) fixes both.
+const SAVE_KEY = 'aaa_save_v1';
+const RUN_SNAPSHOT_KEY = 'aaa_run_snapshot_v1';
+let saveTimer = null;
+
+function saveLocalProgress() {
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify({
+      collection: state.collection,
+      activeDeck: state.activeDeck,
+      bestWave: state.bestWave,
+      gems: state.gems,
+      cardCoin: state.cardCoin,
+      labTokens: state.labTokens,
+      labProgress: state.labProgress,
+      masteryPoints: state.masteryPoints,
+    }));
+  } catch (e) { /* storage unavailable/full — non-fatal, just skip persisting this tick */ }
+}
+
+function scheduleLocalSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveLocalProgress, 400);
+}
+
+function loadLocalProgress() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (data.collection) state.collection = data.collection;
+    if (data.activeDeck) state.activeDeck = data.activeDeck.filter(id => state.collection[id]);
+    if (typeof data.bestWave === 'number') state.bestWave = Math.max(state.bestWave, data.bestWave);
+    if (typeof data.gems === 'number') state.gems = data.gems;
+    if (typeof data.cardCoin === 'number') state.cardCoin = data.cardCoin;
+    if (data.labTokens) state.labTokens = data.labTokens;
+    if (data.labProgress) state.labProgress = data.labProgress;
+    if (typeof data.masteryPoints === 'number') state.masteryPoints = data.masteryPoints;
+  } catch (e) { /* corrupted save — ignore and start fresh rather than crash */ }
+}
+
+// a lightweight snapshot of the ACTIVE run (gold/wave/placed units/bench), saved
+// continuously while a run is in progress so a mid-wave reload can resume instead
+// of dumping the player back to an empty home screen
+function saveRunSnapshot() {
+  if (state.screen !== 'game' || state.phase === 'idle' || state.phase === 'gameover') {
+    localStorage.removeItem(RUN_SNAPSHOT_KEY);
+    return;
+  }
+  try {
+    localStorage.setItem(RUN_SNAPSHOT_KEY, JSON.stringify({
+      wave: state.wave, gold: state.gold, placed: state.placed, bench: state.bench,
+      runUpgrades: state.runUpgrades, activeDeck: state.activeDeck, ts: Date.now(),
+    }));
+  } catch (e) { /* non-fatal */ }
+}
+
+function tryRestoreRunSnapshot() {
+  try {
+    const raw = localStorage.getItem(RUN_SNAPSHOT_KEY);
+    if (!raw) return false;
+    const snap = JSON.parse(raw);
+    // stale snapshots (long-abandoned run, e.g. from a previous day) aren't resumed
+    if (!snap || Date.now() - snap.ts > 30 * 60 * 1000) { localStorage.removeItem(RUN_SNAPSHOT_KEY); return false; }
+    state.wave = snap.wave || 0;
+    state.gold = typeof snap.gold === 'number' ? snap.gold : 50;
+    state.placed = snap.placed || {};
+    state.bench = snap.bench || [];
+    state.runUpgrades = snap.runUpgrades || {};
+    if (snap.activeDeck) state.activeDeck = snap.activeDeck.filter(id => state.collection[id]);
+    updateDeckBonus();
+    document.getElementById('startRow').classList.add('hidden');
+    // set phase away from 'idle' BEFORE showScreen()'s internal render() runs — render()
+    // always calls saveRunSnapshot(), whose guard treats phase 'idle' as "no run in
+    // progress" and deletes the snapshot; doing this after showScreen() meant the very
+    // act of restoring immediately erased the snapshot it just restored, so a second
+    // reload right after resuming would lose the run again
+    state.phase = 'prep';
+    showScreen('game');
+    beginPrep(); // resume by re-running the current wave's spawn queue from a clean prep countdown
+    log(`이전 진행 상황을 복구했습니다 (웨이브 ${state.wave})`);
+    return true;
+  } catch (e) {
+    localStorage.removeItem(RUN_SNAPSHOT_KEY);
+    return false;
+  }
 }
 
 // ---------------- deck / collection / units ----------------
@@ -127,9 +228,36 @@ function enhanceCard(defId) {
   entry.count -= req;
   entry.level += 1;
   const def = UNIT_DEFS_BY_ID[defId];
-  // every card level-up feeds 2 연구실 skill tokens into that subtype's tree
+  // every card level-up feeds 2 연구실 skill tokens into that subtype's tree, AND
+  // 2 공용 마스터리 포인트that can be spent on ANY subtype's tree
   state.labTokens[def.subKey] = (state.labTokens[def.subKey] || 0) + 2;
-  log(`${def.name} 강화! Lv.${entry.level} (+2 ${SUBTYPES[def.subKey].name} 연구 토큰)`);
+  state.masteryPoints = (state.masteryPoints || 0) + 2;
+  log(`${def.name} 강화! Lv.${entry.level} (+2 ${SUBTYPES[def.subKey].name} 토큰, +2 공용 마스터리)`);
+  render();
+}
+
+// enhances every owned card as many times as its duplicate stock allows, in one click,
+// instead of clicking each card's enhance button over and over
+function bulkEnhanceAll() {
+  let totalUps = 0;
+  for (const defId of ownedDefIdList()) {
+    const entry = state.collection[defId];
+    let ups = 0;
+    while (entry.level < ENHANCE_MAX_LEVEL) {
+      const req = enhanceRequirement(entry.level);
+      if (entry.count < req) break;
+      entry.count -= req;
+      entry.level += 1;
+      ups++;
+    }
+    if (ups > 0) {
+      const def = UNIT_DEFS_BY_ID[defId];
+      state.labTokens[def.subKey] = (state.labTokens[def.subKey] || 0) + 2 * ups;
+      state.masteryPoints = (state.masteryPoints || 0) + 2 * ups;
+      totalUps += ups;
+    }
+  }
+  log(totalUps > 0 ? `일괄 강화 완료! 총 ${totalUps}회 강화됨` : '강화 가능한 카드가 없습니다');
   render();
 }
 
@@ -202,7 +330,7 @@ function computeDeckBonuses() {
   deck.forEach(d => { tierCount[d.tierId] = (tierCount[d.tierId] || 0) + 1; });
   for (const tierId of Object.keys(tierCount)) {
     const n = tierCount[tierId];
-    const tier = TIERS.find(t => t.id === tierId);
+    const tier = TIERS_BY_ID[tierId];
     const idx = tierRank.indexOf(tierId);
     if (n >= 5) {
       const v = 10 + idx * 3;
@@ -236,8 +364,13 @@ function upgradeLabNode(subKey, nodeId) {
   const level = labNodeLevel(subKey, nodeId);
   const cost = labNodeCost(level);
   const tokens = state.labTokens[subKey] || 0;
-  if (tokens < cost) return;
-  state.labTokens[subKey] = tokens - cost;
+  const mastery = state.masteryPoints || 0;
+  if (tokens + mastery < cost) return;
+  // spend the subtype's own tokens first, then draw the remainder from the
+  // universal 공용 마스터리 pool (usable on any subtype's tree)
+  const fromTokens = Math.min(tokens, cost);
+  state.labTokens[subKey] = tokens - fromTokens;
+  state.masteryPoints = mastery - (cost - fromTokens);
   state.labProgress[subKey] = state.labProgress[subKey] || {};
   state.labProgress[subKey][nodeId] = level + 1;
   log(`${node.name} Lv.${level + 1} 습득!`);
@@ -380,6 +513,7 @@ function spawnMonster(kind) {
     id: state.monsterSeq, kind, hp, maxHp: hp, speed,
     trackPos, lane, x: p.x, y: p.y,
     slowUntil: 0, slowFactor: 1, debuffUntil: 0, debuffAtkTakenMult: 1,
+    stunUntil: 0, // hard CC, separate mechanic from slow: tickMonsters skips movement entirely while now < stunUntil
     dots: [], // { dmgPerTick, ticksLeft, nextTick }
   };
   state.monsters.push(m);
@@ -396,6 +530,10 @@ function beginPrep() {
 function beginWave() {
   state.wave++;
   state.phase = 'wave';
+  // boss waves get a much longer clock (60s) than normal/mid waves (20s) — 20s was
+  // too tight to actually track down and kill a boss before an automatic loss
+  const isBossWave = state.wave % 10 === 0;
+  state.waveDuration = isBossWave ? 60 : 20;
   state.waveTimer = state.waveDuration;
   document.getElementById('wavePrepOverlay').classList.add('hidden');
   state.bossAliveThisWave = false;
@@ -403,7 +541,7 @@ function beginWave() {
 
   const queue = [];
   for (let i = 0; i < 20; i++) queue.push({ t: (i / 20) * state.waveDuration, kind: 'normal' });
-  if (state.wave % 10 === 0) queue.push({ t: 1, kind: 'boss' });
+  if (isBossWave) queue.push({ t: 1, kind: 'boss' });
   else if (state.wave % 5 === 0) queue.push({ t: 1, kind: 'mid' });
   queue.sort((a, b) => a.t - b.t);
   state.spawnQueue = queue;
@@ -415,12 +553,21 @@ function endWave() {
   if (state.wave % 10 === 0 && state.bossAliveThisWave) {
     return gameOver('보스를 제한시간 내에 처치하지 못했습니다');
   }
-  const goldGain = 15 + state.wave * 5;
+  // gold is only awarded every 5 waves now (accumulated across the skipped waves),
+  // not on every single wave clear — card coin still drops every wave
+  const goldMilestone = state.wave % 5 === 0;
   const coinGain = 5 + state.wave * 2;
-  state.gold += goldGain;
   state.cardCoin += coinGain;
-  log(`웨이브 ${state.wave} 종료! +${goldGain} 골드, +${coinGain} 카드코인`);
-  showWaveToast(`WAVE ${state.wave} CLEAR   +${goldGain} 골드`);
+  if (goldMilestone) {
+    let goldGain = 0;
+    for (let w = state.wave - 4; w <= state.wave; w++) goldGain += 15 + w * 5;
+    state.gold += goldGain;
+    log(`웨이브 ${state.wave} 종료! +${goldGain} 골드, +${coinGain} 카드코인`);
+    showWaveToast(`WAVE ${state.wave} CLEAR   +${goldGain} 골드`);
+  } else {
+    log(`웨이브 ${state.wave} 종료! +${coinGain} 카드코인`);
+    showWaveToast(`WAVE ${state.wave} CLEAR`);
+  }
   flashField('flashGold');
   // only the very first wave has a 3s prep countdown; afterwards waves chain immediately
   beginWave();
@@ -460,6 +607,10 @@ function resetRun() {
   state.projectiles = [];
   state.particles = [];
   state.floatingTexts = [];
+  state.zones = [];
+  state.turrets = [];
+  state.rings = [];
+  state.bolts = [];
   state.bossAliveThisWave = false;
   state.bossKilledInTime = true;
   document.getElementById('gameOverOverlay').classList.add('hidden');
@@ -525,6 +676,20 @@ function gachaNormal() {
   render();
 }
 
+const GACHA_BULK_COUNT = 10;
+function gachaBulkNormal() {
+  const totalCost = GACHA_NORMAL_COST * GACHA_BULK_COUNT;
+  if (state.cardCoin < totalCost) return;
+  state.cardCoin -= totalCost;
+  for (let i = 0; i < GACHA_BULK_COUNT; i++) {
+    const tier = rollCardTier();
+    const pool = UNIT_DEFS.filter(d => d.tierId === tier.id);
+    acquireCard(pool);
+  }
+  log(`일반 뽑기 ${GACHA_BULK_COUNT}연 완료!`);
+  render();
+}
+
 function gachaGem() {
   if (state.gems < GACHA_GEM_COST) return;
   state.gems -= GACHA_GEM_COST;
@@ -540,7 +705,8 @@ function gachaGem() {
 }
 
 function summonUnit() {
-  if (state.gold < 10 || state.activeDeck.length === 0 || state.phase === 'gameover') return;
+  if (state.gold < 10 || state.activeDeck.length === 0 || state.phase === 'idle' || state.phase === 'gameover') return;
+  if (state.bench.length >= BENCH_MAX) { log(`대기 유닛은 최대 ${BENCH_MAX}칸까지입니다. 필드에 배치하거나 판매하세요`); render(); return; }
   state.gold -= 10;
   const defId = state.activeDeck[Math.floor(Math.random() * state.activeDeck.length)];
   const grade = rollGrade();
@@ -559,6 +725,7 @@ function placeFromBench(idx) {
   if (emptyCells.length === 0) {
     log('필드에 빈 자리가 없습니다');
     state.selected = { kind: 'bench', idx };
+    state.selectedAt = performance.now();
     render();
     return;
   }
@@ -610,8 +777,17 @@ function selectField(key) {
   }
   if (state.placed[key]) {
     state.selected = { kind: 'field', key };
+    state.selectedAt = performance.now();
     render();
   }
+}
+
+// small particle "poof" wherever a placed unit leaves the field (sold), so the slot
+// doesn't just blink empty — reuses the same particle system as combat hit effects
+function poofAt(key, color) {
+  const [c, r] = key.split(',').map(Number);
+  const center = cellCenter(c, r);
+  spawnHitParticles(center.x, center.y, color, 10);
 }
 
 function sellSelected() {
@@ -619,7 +795,11 @@ function sellSelected() {
   if (!sel) return;
   let inst;
   if (sel.kind === 'bench') inst = state.bench.splice(sel.idx, 1)[0];
-  else { inst = state.placed[sel.key]; delete state.placed[sel.key]; }
+  else {
+    inst = state.placed[sel.key];
+    if (inst) poofAt(sel.key, (GRADES_BY_ID[inst.grade] || {}).color || '#8a8f9c');
+    delete state.placed[sel.key];
+  }
   if (inst) state.gold += GRADE_SELL_PRICE[inst.grade];
   state.selected = null;
   render();
@@ -635,7 +815,11 @@ function bulkSell() {
   });
   for (const key of Object.keys(state.placed)) {
     const inst = state.placed[key];
-    if (rank.indexOf(inst.grade) <= maxIdx) { gained += GRADE_SELL_PRICE[inst.grade]; delete state.placed[key]; }
+    if (rank.indexOf(inst.grade) <= maxIdx) {
+      gained += GRADE_SELL_PRICE[inst.grade];
+      poofAt(key, (GRADES_BY_ID[inst.grade] || {}).color || '#8a8f9c');
+      delete state.placed[key];
+    }
   }
   state.gold += gained;
   state.selected = null;
@@ -679,7 +863,7 @@ function updateSupportBuffs() {
 }
 
 function findTargets(center, statsObj, count) {
-  const inRange = state.monsters.filter(m => statsObj.fullRange || dist(center.x, center.y, m.x, m.y) <= statsObj.range * CELL);
+  const inRange = state.monsters.filter(m => !m.dying && (statsObj.fullRange || dist(center.x, center.y, m.x, m.y) <= statsObj.range * CELL));
   if (count <= 1) {
     // single-target units feel more natural engaging whatever is closest, like a real guard would,
     // rather than every unit on the field snapping to the same lowest-hp monster
@@ -697,6 +881,94 @@ function findTargets(center, statsObj, count) {
 const MAX_FLOATING_TEXTS = 90;
 const MAX_PARTICLES = 240;
 const MAX_PROJECTILES = 150;
+const MAX_ZONES = 14;
+const MAX_TURRETS = 8;
+
+// lingering ground-effect areas (fire zones from magic_multi, plague zones from
+// buff_debuff). Duration/tick-cadence run on the speed-multiplied dt (via tickZones),
+// same as the rest of combat, so they read consistently at 1x and 10x game speed.
+function spawnZone(x, y, r, kind, dmgPerTick, tickInterval, duration) {
+  if (state.zones.length >= MAX_ZONES) return;
+  state.zones.push({ x, y, r, kind, dmgPerTick, tickInterval, tickTimer: tickInterval, life: duration, particleTimer: 0 });
+}
+
+function tickZones(dt) {
+  if (state.zones.length === 0) return;
+  for (const z of state.zones) {
+    z.life -= dt;
+    z.tickTimer -= dt;
+    z.particleTimer -= dt;
+    if (z.tickTimer <= 0) {
+      z.tickTimer += z.tickInterval;
+      for (const m of state.monsters) {
+        if (m.dying) continue;
+        if (dist(z.x, z.y, m.x, m.y) <= z.r) {
+          dealDamage(m, z.dmgPerTick, false);
+          if (z.kind === 'plague') applySlow(m, 0.6, performance.now() + 700);
+        }
+      }
+    }
+    if (z.particleTimer <= 0) {
+      if (z.kind === 'fire') {
+        // flame-colored particles licking upward out of the zone
+        z.particleTimer = 0.12;
+        if (state.particles.length < MAX_PARTICLES) {
+          const px = z.x + (Math.random() * z.r * 1.2 - z.r * 0.6);
+          const py = z.y + (Math.random() * z.r * 0.5 - z.r * 0.25);
+          state.particles.push({
+            x: px, y: py, vx: (Math.random() * 20 - 10), vy: -50 - Math.random() * 40,
+            t: 0, dur: 0.35 + Math.random() * 0.2, color: Math.random() < 0.5 ? '#c17a41' : '#d19a5a', r: 2 + Math.random() * 2,
+          });
+        }
+      } else {
+        // plague: slower, sickly, bubbling motion — visually distinct from fire
+        z.particleTimer = 0.22;
+        if (state.particles.length < MAX_PARTICLES) {
+          const px = z.x + (Math.random() * z.r * 1.4 - z.r * 0.7);
+          const py = z.y + (Math.random() * z.r * 0.6 - z.r * 0.3);
+          state.particles.push({
+            x: px, y: py, vx: (Math.random() * 12 - 6), vy: -14 - Math.random() * 10,
+            t: 0, dur: 0.6 + Math.random() * 0.3, color: '#8a7a9c', r: 2.5 + Math.random() * 2.5,
+          });
+        }
+      }
+    }
+  }
+  state.zones = state.zones.filter(z => z.life > 0);
+}
+
+// temporary buff_support deployable turret: fires on its own cooldown at the
+// nearest non-dying monster in range, dealing modest damage off the caster's atk
+function spawnTurret(x, y, range, dmgPerTick, fireInterval, duration) {
+  if (state.turrets.length >= MAX_TURRETS) return;
+  state.turrets.push({ x, y, range, dmgPerTick, fireInterval, fireTimer: fireInterval, life: duration });
+}
+
+function tickTurrets(dt) {
+  if (state.turrets.length === 0) return;
+  for (const t of state.turrets) {
+    t.life -= dt;
+    t.fireTimer -= dt;
+    if (t.fireTimer <= 0) {
+      t.fireTimer += t.fireInterval;
+      let target = null, bestD = Infinity;
+      for (const m of state.monsters) {
+        if (m.dying) continue;
+        const d = dist(t.x, t.y, m.x, m.y);
+        if (d <= t.range && d < bestD) { bestD = d; target = m; }
+      }
+      if (target) {
+        dealDamage(target, t.dmgPerTick, false);
+        spawnHitParticles(target.x, target.y, '#379966', 4);
+        t.fireFlash = performance.now(); // recoil scale-punch cue drawn in draw()
+        if (state.projectiles.length < MAX_PROJECTILES) {
+          state.projectiles.push({ x1: t.x, y1: t.y, x2: target.x, y2: target.y, t: 0, dur: 0.15, color: '#379966' });
+        }
+      }
+    }
+  }
+  state.turrets = state.turrets.filter(t => t.life > 0);
+}
 
 // applying the same status again while it's already active refreshes/strengthens it
 // instead of stacking a duplicate, independent instance of the same effect
@@ -746,6 +1018,8 @@ function dealDamage(m, amount, isCrit) {
 // modifiers, the hit itself, then any on-hit 연구실 procs (splash, poison/DoT)
 function resolveHit(m, inst, stats, center) {
   const now = performance.now();
+  const def = defOf(inst);
+  inst.atkFlash = now; // quick recoil/scale-punch drawn in draw(), for attack feedback that reads at a glance
   const crit = Math.random() * 100 < stats.critChance;
   let dmg = stats.atk * (crit ? (1 + stats.critDmg / 100) : 1);
   if ((m.kind === 'boss' || m.kind === 'mid') && stats.bossDmg) dmg *= (1 + stats.bossDmg / 100);
@@ -762,24 +1036,124 @@ function resolveHit(m, inst, stats, center) {
   // 여파 (연구실): 주변 대상에게도 감소된 피해
   if (stats.splashPct > 0) {
     for (const other of state.monsters) {
-      if (other === m) continue;
+      if (other === m || other.dying) continue;
       if (dist(m.x, m.y, other.x, other.y) <= 55) {
         dealDamage(other, dmg * stats.splashPct / 100, false);
         spawnHitParticles(other.x, other.y, '#c17a41', 3);
       }
     }
   }
-  // 도트 계열 (연구실): 확률로 중독/화상/출혈 등 지속피해 부여 (같은 효과는 중복 대신 갱신됨)
+  // 도트 계열 (연구실): 확률로 서브타입에 맞는 원소 효과 발동 (같은 효과는 중복 대신 갱신/강화됨)
   if (stats.dotChance > 0 && Math.random() * 100 < stats.dotChance) {
-    applyDot(m, stats.atk * 0.4);
+    if (def.subKey === 'magic_ctrl') {
+      // 동상: 서리 스택이 2.5초 내 갱신되지 않으면 초기화, 3스택에서 강한 결빙
+      if (m.frostStacks && now - (m.frostStackAt || 0) > 2500) m.frostStacks = 0;
+      m.frostStacks = (m.frostStacks || 0) + 1;
+      m.frostStackAt = now;
+      if (m.frostStacks >= 3) {
+        m.frostStacks = 0;
+        // freeze duration scales off 혹한 강화 (slowAdd -> folded into stats.slow), so
+        // deeper investment in that branch makes the payoff hit harder, not just proc more
+        const freezeDur = Math.min(2200, 600 + stats.slow * 25);
+        applySlow(m, 0.03, now + freezeDur); // hard freeze, near-total stop
+        spawnIcyShatter(m.x, m.y);
+      } else {
+        applySlow(m, Math.max(0.35, 1 - stats.slow / 100 - 0.3), now + 1500);
+      }
+    } else if (def.subKey === 'magic_multi') {
+      // 화염 낙인: 화상(DoT) + 잔류 화염지대 (연쇄 폭발 노드가 지대 피해를 강화)
+      applyDot(m, stats.atk * 0.4);
+      spawnZone(m.x, m.y, 48, 'fire', stats.atk * 0.12 * (1 + stats.splashPct / 100), 0.5, 3);
+    } else if (def.subKey === 'atk_multi') {
+      // 유혈: 기본 스플래시보다 큰 범위의 폭발 (여파 노드가 강도를 강화)
+      const bigR = 55 * 1.6;
+      for (const other of state.monsters) {
+        if (other === m || other.dying) continue;
+        if (dist(m.x, m.y, other.x, other.y) <= bigR) {
+          dealDamage(other, stats.atk * (stats.splashPct / 100) * 1.3, false);
+        }
+      }
+      spawnHitParticles(m.x, m.y, '#c17a41', 16);
+      spawnShockRing(m.x, m.y, bigR, '#c17a41');
+      shakeScreen(2.5);
+    } else if (def.subKey === 'buff_debuff') {
+      // 역병: 잔류 역병지대 (둔화 + 지속피해) — 강도/지속시간이 약화 강화(debuffPct)로 강화됨
+      const plagueDur = Math.min(6, 3 + stats.debuffPct * 0.06);
+      spawnZone(m.x, m.y, 45, 'plague', stats.atk * 0.25 * (1 + stats.debuffPct / 200), 0.6, plagueDur);
+    } else {
+      applyDot(m, stats.atk * 0.4);
+    }
   }
+
+  // 공격형-단일 전용: 확률 기반 기절 + 매우 낮은 확률의 즉사 (일격필살/처형자의 원한 노드 레벨에서 직접 파생,
+  // 해당 노드가 이미 부여하는 critChanceAdd/normalDmgPct는 그대로 유지되는 '추가' 효과)
+  if (def.subKey === 'atk_single' && !m.dying) {
+    const branchALvl = labNodeLevel('atk_single', 'branchA');
+    const leafALvl = labNodeLevel('atk_single', 'leafA');
+    const stunChance = Math.min(15, branchALvl * 1.1); // %, capped ~15%
+    const executeChance = Math.min(4, leafALvl * 0.28); // % capped ~4%, normal-kind only
+    if (stunChance > 0 && Math.random() * 100 < stunChance) {
+      m.stunUntil = Math.max(m.stunUntil || 0, now + 700);
+      spawnStunBurst(m.x, m.y);
+    }
+    if (m.kind === 'normal' && executeChance > 0 && Math.random() * 100 < executeChance) {
+      m.hp = 0; // routes through the existing dying/fade pipeline in tickCombat
+      spawnHitParticles(m.x, m.y, '#c1465f', 20);
+      if (state.floatingTexts.length < MAX_FLOATING_TEXTS) {
+        state.floatingTexts.push({ x: m.x, y: m.y - 20, t: 0, dur: 1.0, value: '즉사!', execute: true });
+      }
+    }
+  }
+}
+
+// 이중 사격 (원거리-단일 전용): 맵 전역 무작위 대상에게 번개가 튀는 보너스 사격 —
+// resolveHit과 달리 사거리 체크 없이 임의의 살아있는 몬스터를 맞힌다. 첫 타격 이후
+// 확률로 "감전"이 발동해 근처의 다른 몬스터로 연쇄된다: 매 점프마다 피해가 절반,
+// 다음 점프 확률도 감소 — 기하급수적 감쇠 + 하드 캡(maxJump)으로 반드시 종료된다.
+const LIGHTNING_CHAIN_RANGE = 95; // px, spatial proximity for the NEXT chain jump (not map-wide)
+const LIGHTNING_MAX_JUMPS = 5;
+const LIGHTNING_BASE_CHAIN_CHANCE = 55; // % chance the FIRST jump (origin -> jump1) occurs
+const LIGHTNING_CHAIN_DECAY = 0.55; // each successive jump's chain-chance is multiplied by this
+
+function resolveHitLightning(startMonster, inst, stats, center, _jumpCount) {
+  const now = performance.now();
+  const hitSet = new Set();
+  let prevPoint = { x: center.x, y: center.y };
+  let cur = startMonster;
+  let jumpDmgMult = 1;
+  let chainChance = LIGHTNING_BASE_CHAIN_CHANCE;
+  let jumps = 0;
+
+  for (let jump = 0; jump <= LIGHTNING_MAX_JUMPS; jump++) {
+    if (!cur || cur.dying || hitSet.has(cur)) break;
+    const crit = Math.random() * 100 < stats.critChance;
+    const dmg = stats.atk * 0.6 * jumpDmgMult * (crit ? (1 + stats.critDmg / 100) : 1);
+    dealDamage(cur, dmg, crit);
+    spawnBolt(prevPoint.x, prevPoint.y, cur.x, cur.y, '#4a90d9');
+    spawnHitParticles(cur.x, cur.y, '#4a90d9', jump === 0 ? 6 : 4);
+    applyDot(cur, stats.atk * 0.2 * jumpDmgMult);
+    hitSet.add(cur);
+    jumps++;
+    prevPoint = { x: cur.x, y: cur.y };
+
+    if (jump >= LIGHTNING_MAX_JUMPS) break;
+    if (Math.random() * 100 >= chainChance) break; // natural geometric decay ends the chain
+    // NEARBY monster only (spatial proximity), never another random map-wide pick
+    const candidates = state.monsters.filter(x => !x.dying && !hitSet.has(x) && dist(cur.x, cur.y, x.x, x.y) <= LIGHTNING_CHAIN_RANGE);
+    if (candidates.length === 0) break;
+    candidates.sort((a, b) => dist(cur.x, cur.y, a.x, a.y) - dist(cur.x, cur.y, b.x, b.y));
+    cur = candidates[0];
+    jumpDmgMult *= 0.5; // each jump halves damage
+    chainChance *= LIGHTNING_CHAIN_DECAY; // and lowers the odds of the next jump
+  }
+  return jumps;
 }
 
 // 지속피해(DoT) 처리: 0.9초 간격으로 3회 틱
 function tickDots(dt) {
   const now = performance.now();
   for (const m of state.monsters) {
-    if (!m.dots || m.dots.length === 0) continue;
+    if (m.dying || !m.dots || m.dots.length === 0) continue;
     m.dots = m.dots.filter(d => {
       if (now >= d.nextTick) {
         dealDamage(m, d.dmgPerTick, false);
@@ -803,6 +1177,7 @@ function triggerLabActiveSkill(inst, def, stats, center, capstoneLvl) {
 
   if (node.activeKind === 'ally') {
     applyAllyBuff(15 + capstoneLvl * 2, 12 + capstoneLvl, now + 5000);
+    spawnTurret(center.x, center.y, 2.5 * CELL, stats.atk * 0.5, 0.5, 5);
     return;
   }
   const inRange = state.monsters.filter(m => stats.fullRange || dist(center.x, center.y, m.x, m.y) <= stats.range * CELL);
@@ -825,11 +1200,65 @@ function spawnHitParticles(x, y, color, count) {
   for (let i = 0; i < count && state.particles.length < MAX_PARTICLES; i++) {
     const ang = Math.random() * Math.PI * 2;
     const spd = 40 + Math.random() * 90;
+    // slight per-particle spawn stagger (negative t) + size/speed variance so a burst
+    // arrives as a quick ripple instead of every particle popping in one synchronous frame
     state.particles.push({
       x, y, vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd,
-      t: 0, dur: 0.35 + Math.random() * 0.2, color, r: 2 + Math.random() * 2.5,
+      t: -Math.random() * 0.045, dur: 0.35 + Math.random() * 0.2, color, r: 1.6 + Math.random() * 3,
+      rot: Math.random() * Math.PI * 2, vrot: (Math.random() * 2 - 1) * 6,
     });
   }
+}
+
+// angular/sharp particle burst for the hard-freeze proc, distinct from the default
+// round soft burst — true faceted shard polygons (see draw()'s `shape:'shard'` branch),
+// not just tight-spread circles, so a freeze reads as glass/ice breaking apart
+function spawnIcyShatter(x, y) {
+  if (state.particles.length >= MAX_PARTICLES) return;
+  const count = 12;
+  for (let i = 0; i < count && state.particles.length < MAX_PARTICLES; i++) {
+    const ang = (Math.PI * 2 * i) / count + Math.random() * 0.3;
+    const spd = 90 + Math.random() * 130;
+    state.particles.push({
+      x, y, vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd,
+      t: -Math.random() * 0.03, dur: 0.24 + Math.random() * 0.16,
+      color: Math.random() < 0.5 ? '#bfe3f5' : '#eaf7fc',
+      r: 2 + Math.random() * 2.6, shape: 'shard',
+      rot: ang, vrot: (Math.random() * 2 - 1) * 4, elong: 1.8 + Math.random() * 1.2,
+    });
+  }
+}
+
+// two small dots orbiting the monster's head while stunned — classic "stunned" cue,
+// cheap to draw (no persistent state needed, computed live in draw() from stunUntil)
+function spawnStunBurst(x, y) {
+  spawnHitParticles(x, y, '#c9a227', 5);
+}
+
+// fast-expanding fast-fading shockwave ring for the atk_multi big-explosion proc
+const MAX_RINGS = 24;
+function spawnShockRing(x, y, maxR, color) {
+  if (state.rings.length >= MAX_RINGS) return;
+  state.rings.push({ x, y, r: 4, maxR, t: 0, dur: 0.32, color });
+}
+
+// jagged lightning polyline between two points: a straight line with a few small
+// random perpendicular jitters along the path reads convincingly as a bolt on canvas
+const MAX_BOLTS = 40;
+function spawnBolt(x1, y1, x2, y2, color) {
+  if (state.bolts.length >= MAX_BOLTS) return;
+  const segs = 5;
+  const pts = [{ x: x1, y: y1 }];
+  const dx = x2 - x1, dy = y2 - y1;
+  const len = Math.hypot(dx, dy) || 1;
+  const nx = -dy / len, ny = dx / len; // perpendicular unit vector
+  for (let i = 1; i < segs; i++) {
+    const t = i / segs;
+    const jitter = (Math.random() * 2 - 1) * Math.min(14, len * 0.18);
+    pts.push({ x: x1 + dx * t + nx * jitter, y: y1 + dy * t + ny * jitter });
+  }
+  pts.push({ x: x2, y: y2 });
+  state.bolts.push({ pts, t: 0, dur: 0.16, color });
 }
 
 // 레전더리/미스틱 카드 전용 자동 스킬. 유닛의 서브타입 특성에 맞춰 서로 다른 효과를 낸다.
@@ -845,6 +1274,7 @@ function triggerLegendarySkill(inst, def, stats, center) {
   if (def.subKey === 'buff_support') {
     // temporary field-wide buff for every placed unit, read live in computeStats
     applyAllyBuff(25 + stats.skillDmgPct * 0.4, 20, now + 5000);
+    spawnTurret(center.x, center.y, 2.5 * CELL, stats.atk * 0.5, 0.5, 5);
     return;
   }
 
@@ -900,10 +1330,24 @@ function tickCombat(dt) {
         swings++;
         for (const m of targets) {
           resolveHit(m, inst, stats, center);
-          // 추가 타격 (연구실): 확률로 사거리 내 다른 대상에게 한 번 더 공격
+          // 추가 타격 (연구실): 확률로 한 번 더 공격. 원거리-단일(이중 사격)은 사거리와
+          // 무관하게 맵 전역의 무작위 대상에게 번개가 튀는 것으로 대체됨
           if (stats.extraAtkChance > 0 && Math.random() * 100 < stats.extraAtkChance) {
-            const others = findTargets(center, stats, targets.length + 1).filter(x => x !== m);
-            if (others.length > 0) resolveHit(others[0], inst, stats, center);
+            if (def.subKey === 'ranged_single') {
+              // 이중 사격: 맞히는 무작위 대상의 "수"가 leafB(이중 사격) 투자 레벨에 따라
+              // 1에서 시작해 서서히 늘어남 (최대치로 캡되어 맵 전체를 쓸어버리지 않도록)
+              const leafBLvl = labNodeLevel('ranged_single', 'leafB');
+              const targetCount = Math.min(4, 1 + Math.floor(leafBLvl / 3));
+              const pool = state.monsters.filter(x => !x.dying && x !== m);
+              for (let i = 0; i < pool.length && i < targetCount; i++) {
+                const pickIdx = Math.floor(Math.random() * pool.length);
+                const bolt = pool.splice(pickIdx, 1)[0];
+                resolveHitLightning(bolt, inst, stats, center);
+              }
+            } else {
+              const others = findTargets(center, stats, targets.length + 1).filter(x => x !== m);
+              if (others.length > 0) resolveHit(others[0], inst, stats, center);
+            }
           }
         }
       }
@@ -929,13 +1373,19 @@ function tickCombat(dt) {
     }
   }
   tickDots(dt);
-  state.monsters = state.monsters.filter(m => {
-    if (m.hp <= 0) {
+  tickZones(dt);
+  tickTurrets(dt);
+  // don't yank a killed monster out of existence on the exact frame it dies — mark it
+  // "dying" and let the main loop fade/shrink it out over a short real-time window
+  // (see the cosmetic-effects block in loop()), so kills read as an impact instead of
+  // monsters just blinking out of the world mid-combat
+  for (const m of state.monsters) {
+    if (m.hp <= 0 && !m.dying) {
+      m.dying = true;
+      m.deathT = 0;
       onMonsterKilled(m);
-      return false;
     }
-    return true;
-  });
+  }
 }
 
 function onMonsterKilled(m) {
@@ -957,6 +1407,8 @@ function onMonsterKilled(m) {
 function tickMonsters(dt) {
   const now = performance.now();
   for (const m of state.monsters) {
+    if (m.dying) continue; // freeze in place while its death fade plays out
+    if (now < m.stunUntil) continue; // stunned: fully immobilized, distinct from slow
     const slow = now < m.slowUntil ? m.slowFactor : 1;
     m.trackPos += m.speed * slow * dt;
     const p = trackPoint(m.trackPos, m.lane);
@@ -966,6 +1418,8 @@ function tickMonsters(dt) {
 
 // ---------------- main loop ----------------
 let lastT = performance.now();
+let snapshotAccum = 0;
+let upgradeListAccum = 0;
 function loop(now) {
   const rawDt = Math.min(0.05, (now - lastT) / 1000);
   lastT = now;
@@ -986,7 +1440,11 @@ function loop(now) {
       }
       tickMonsters(dt);
       tickCombat(dt);
-      if (state.monsters.length >= 50) {
+      // dying monsters linger briefly for their death-fade animation (see below), so
+      // they must NOT count toward the swarm cap — otherwise the very kill that should
+      // have saved the player could still trigger a false game-over for ~0.28s
+      const aliveCount = state.monsters.reduce((n, m) => n + (m.dying ? 0 : 1), 0);
+      if (aliveCount >= 50) {
         gameOver('필드에 몬스터가 50마리 이상 쌓였습니다');
       } else if (state.waveTimer <= 0) {
         endWave();
@@ -996,14 +1454,31 @@ function loop(now) {
     // purely cosmetic effects run on real time (rawDt), not the speed-multiplied dt,
     // so hit sparks/damage numbers stay readable instead of flashing by at 10x speed
     state.projectiles = state.projectiles.filter(p => { p.t += rawDt; return p.t < p.dur; });
+    state.rings = state.rings.filter(rg => { rg.t += rawDt; return rg.t < rg.dur; });
+    state.bolts = state.bolts.filter(b => { b.t += rawDt; return b.t < b.dur; });
     for (const pt of state.particles) { pt.x += pt.vx * rawDt; pt.y += pt.vy * rawDt; pt.vx *= 0.92; pt.vy *= 0.92; pt.t += rawDt; }
     state.particles = state.particles.filter(pt => pt.t < pt.dur);
     for (const ft of state.floatingTexts) { ft.y -= 24 * rawDt; ft.t += rawDt; }
     state.floatingTexts = state.floatingTexts.filter(ft => ft.t < ft.dur);
     if (shakeTime > 0) shakeTime = Math.max(0, shakeTime - rawDt);
+    // dying monsters fade/shrink out over real time (not speed-multiplied) so kills
+    // read the same at 1x and 10x speed instead of vanishing instantly at high speed
+    const DEATH_FADE_DUR = 0.28;
+    for (const m of state.monsters) { if (m.dying) m.deathT += rawDt; }
+    state.monsters = state.monsters.filter(m => !m.dying || m.deathT < DEATH_FADE_DUR);
 
     updateHud();
     draw();
+
+    // keep the resumable run-snapshot fresh during live combat too, not just on
+    // click-triggered render() calls — gold/monster kills change constantly mid-wave
+    snapshotAccum += rawDt;
+    if (snapshotAccum >= 3) { snapshotAccum = 0; saveRunSnapshot(); }
+
+    // keep the 유닛 강화 buttons' disabled state honest as gold changes passively
+    // mid-wave, without rebuilding that DOM every single frame
+    upgradeListAccum += rawDt;
+    if (upgradeListAccum >= 0.25) { upgradeListAccum = 0; renderUpgradeList(); }
   }
 
   requestAnimationFrame(loop);
@@ -1064,6 +1539,60 @@ function draw() {
     ctx.strokeRect(MARGIN + p.c * CELL + 2, MARGIN + p.r * CELL + 2, CELL - 4, CELL - 4);
   }
 
+  // lingering zone effects (fire/plague), drawn under units/monsters
+  for (const z of state.zones) {
+    const nowZ = performance.now();
+    const pulse = 0.16 + Math.sin(nowZ / 300 + z.x) * 0.05;
+    // radial gradient (hot core fading to edge) instead of a flat translucent disc —
+    // reads much richer than a single solid fill, still one fillRect-cost draw call
+    const zCol = z.kind === 'fire' ? '193,122,65' : '138,122,156';
+    const grad = ctx.createRadialGradient(z.x, z.y, 0, z.x, z.y, z.r);
+    grad.addColorStop(0, `rgba(${zCol},${pulse * 1.8})`);
+    grad.addColorStop(0.6, `rgba(${zCol},${pulse})`);
+    grad.addColorStop(1, `rgba(${zCol},0)`);
+    ctx.beginPath();
+    ctx.arc(z.x, z.y, z.r, 0, Math.PI * 2);
+    ctx.fillStyle = grad;
+    ctx.fill();
+    if (z.kind === 'fire') {
+      // "alive" pulsing radius on the edge stroke
+      const edgeR = z.r + Math.sin(nowZ / 180 + z.x) * 3;
+      ctx.beginPath();
+      ctx.arc(z.x, z.y, edgeR, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(193,122,65,0.45)';
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+    } else {
+      // slow dash-rotation edge, distinct from fire's pulsing
+      ctx.save();
+      ctx.setLineDash([4, 5]);
+      ctx.lineDashOffset = -(nowZ / 40) % 100;
+      ctx.beginPath();
+      ctx.arc(z.x, z.y, z.r, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(138,122,156,0.5)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+  // buff_support deployable turrets — quick scale-punch on fire, mirroring the same
+  // attack-recoil technique used for placed units elsewhere in this function
+  for (const t of state.turrets) {
+    const sinceFire = performance.now() - (t.fireFlash || -9999);
+    const fireScale = sinceFire < 130 ? 1 + 0.22 * (1 - sinceFire / 130) : 1;
+    ctx.save();
+    if (fireScale !== 1) { ctx.translate(t.x, t.y); ctx.scale(fireScale, fireScale); ctx.translate(-t.x, -t.y); }
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, 11, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.strokeStyle = '#379966';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    drawGlyph(ctx, 'turret', t.x, t.y, 6, '#379966');
+    ctx.restore();
+  }
+
   // selected unit range indicator
   if (state.selected) {
     let inst = null, center = null;
@@ -1076,6 +1605,10 @@ function draw() {
     }
     if (inst && center) {
       const stats = computeStats(inst);
+      // quick fade-in rather than popping in at full opacity the instant something's selected
+      const fadeIn = Math.min(1, (performance.now() - (state.selectedAt || 0)) / 150);
+      ctx.save();
+      ctx.globalAlpha = fadeIn;
       ctx.fillStyle = 'rgba(58,110,255,0.08)';
       ctx.strokeStyle = 'rgba(58,110,255,0.55)';
       ctx.lineWidth = 2;
@@ -1090,6 +1623,7 @@ function draw() {
         ctx.stroke();
       }
       ctx.lineWidth = 1;
+      ctx.restore();
     }
     // highlight interior cells as placement targets when a bench unit selected
     if (state.selected.kind === 'bench') {
@@ -1112,16 +1646,34 @@ function draw() {
     const lvl = levelOf(inst.defId);
     const runLvl = state.runUpgrades[inst.defId] || 0;
 
-    // freshly-placed units pop in with a quick ease-out scale instead of just appearing
-    const age = performance.now() - (inst.placedAt || 0);
-    const popping = age < 220;
-    if (popping) {
-      const t = Math.min(1, age / 220);
-      const scale = 0.4 + 0.6 * (1 - Math.pow(1 - t, 3));
+    // freshly-placed units pop in with a quick ease-out scale instead of just appearing,
+    // and every attack gives a quick recoil scale-punch — small per-unit motion that
+    // makes the field read as "alive" instead of static badges that only ever move
+    // when repositioned
+    const nowDraw = performance.now();
+    const age = nowDraw - (inst.placedAt || 0);
+    const popScale = age < 220 ? 0.4 + 0.6 * (1 - Math.pow(1 - Math.min(1, age / 220), 3)) : 1;
+    const sinceAtk = nowDraw - (inst.atkFlash || -9999);
+    const atkScale = sinceAtk < 110 ? 1 + 0.16 * (1 - sinceAtk / 110) : 1;
+    const unitScale = popScale * atkScale;
+    if (unitScale !== 1) {
       ctx.save();
       ctx.translate(x, y);
-      ctx.scale(scale, scale);
+      ctx.scale(unitScale, unitScale);
       ctx.translate(-x, -y);
+    }
+
+    // buffed indicator: a soft pulsing ring around the whole unit (same pulse language
+    // as boss/mid monsters elsewhere in this file) instead of a small static badge icon —
+    // reads as "something is actively happening to this unit" at a glance on the field
+    const isBuffedNow = !!inst.buffs || (state.allyBuff && performance.now() < state.allyBuff.until);
+    if (isBuffedNow) {
+      const pulse = 3 + Math.sin(performance.now() / 220) * 2.5;
+      ctx.beginPath();
+      ctx.arc(x, y, BADGE_R + 6 + pulse, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(55,153,102,0.45)';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
     }
 
     ctx.beginPath();
@@ -1166,12 +1718,50 @@ function draw() {
       ctx.strokeStyle = '#111827'; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(x, y, BADGE_R + 5, 0, Math.PI * 2); ctx.stroke();
     }
-    if (popping) ctx.restore();
+    if (unitScale !== 1) ctx.restore();
   }
 
-  // projectiles
+  // shockwave rings (atk_multi big explosion): fast-expanding, fast-fading stroke circle
+  for (const rg of state.rings) {
+    const lt = rg.t / rg.dur;
+    const ease = 1 - Math.pow(1 - lt, 2);
+    const r = rg.r + (rg.maxR - rg.r) * ease;
+    const a = Math.max(0, 1 - ease);
+    // faint soft outer band + a crisp bright leading edge, instead of one flat stroke
+    ctx.beginPath();
+    ctx.arc(rg.x, rg.y, r, 0, Math.PI * 2);
+    ctx.strokeStyle = hexToRgba(rg.color, a * 0.3);
+    ctx.lineWidth = 9 * a + 1;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(rg.x, rg.y, r, 0, Math.PI * 2);
+    ctx.strokeStyle = hexToRgba(rg.color, a);
+    ctx.lineWidth = 2 * a + 0.6;
+    ctx.stroke();
+  }
+
+  // jagged lightning bolts (ranged_single chain): a soft wide glow pass underneath
+  // a crisp bright core, easing out on width+alpha — cheap "afterimage" look for a
+  // fast-fading effect without an actual second trailing draw
+  for (const b of state.bolts) {
+    const lt = b.t / b.dur;
+    const ease = 1 - Math.pow(1 - lt, 2);
+    const a = Math.max(0, 1 - ease);
+    ctx.beginPath();
+    b.pts.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = hexToRgba(b.color, a * 0.35);
+    ctx.lineWidth = 6 * (1 - ease * 0.7);
+    ctx.stroke();
+    ctx.strokeStyle = hexToRgba('#ffffff', a * 0.9);
+    ctx.lineWidth = 1.4 * (1 - ease * 0.5);
+    ctx.stroke();
+  }
+
+  // projectiles: eased (ease-out) rather than linear travel, for a snappier arrival
   for (const p of state.projectiles) {
-    const t = p.t / p.dur;
+    const lt = p.t / p.dur;
+    const t = 1 - Math.pow(1 - lt, 2);
     const x = p.x1 + (p.x2 - p.x1) * t;
     const y = p.y1 + (p.y2 - p.y1) * t;
     ctx.beginPath();
@@ -1181,52 +1771,159 @@ function draw() {
   }
 
   // monsters
+  const nowDrawMonsters = performance.now();
   for (const m of state.monsters) {
     const radius = m.kind === 'boss' ? 22 : m.kind === 'mid' ? 16 : 10;
-    if (m.kind === 'boss' || m.kind === 'mid') {
-      const pulse = 3 + Math.sin(performance.now() / 180) * 2;
+    // dying monsters shrink + fade out over DEATH_FADE_DUR (set in loop()) instead of
+    // just vanishing on the frame their hp crosses 0 — reads as an actual kill, and
+    // still holds up at high game-speed multipliers since it runs on real time
+    const dyingT = m.dying ? Math.min(1, (m.deathT || 0) / 0.28) : 0;
+    const deathScale = 1 - dyingT * 0.7;
+    const deathAlpha = 1 - dyingT;
+    // a tiny idle bob so the field doesn't look like static tokens sitting on rails —
+    // per-monster phase offset (via id) keeps them from all bobbing in lockstep
+    const bob = m.dying ? 0 : Math.sin(nowDrawMonsters / 260 + m.id) * 1.3;
+    ctx.save();
+    ctx.globalAlpha = deathAlpha;
+    if (deathScale !== 1) {
+      ctx.translate(m.x, m.y + bob);
+      ctx.scale(deathScale, deathScale);
+      ctx.translate(-m.x, -(m.y + bob));
+    }
+    const my = m.y + bob;
+    if ((m.kind === 'boss' || m.kind === 'mid') && !m.dying) {
+      const pulse = 3 + Math.sin(nowDrawMonsters / 180) * 2;
       ctx.beginPath();
-      ctx.arc(m.x, m.y, radius + pulse, 0, Math.PI * 2);
+      ctx.arc(m.x, my, radius + pulse, 0, Math.PI * 2);
       ctx.strokeStyle = m.kind === 'boss' ? 'rgba(193,70,95,0.4)' : 'rgba(193,122,65,0.4)';
       ctx.lineWidth = 3;
       ctx.stroke();
     }
     ctx.beginPath();
-    ctx.arc(m.x, m.y, radius, 0, Math.PI * 2);
+    ctx.arc(m.x, my, radius, 0, Math.PI * 2);
     ctx.fillStyle = m.kind === 'boss' ? '#c1465f' : m.kind === 'mid' ? '#c17a41' : '#b8657a';
     ctx.fill();
     ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; ctx.stroke();
+
+    // hard-frozen: translucent pale-blue overlay so "this one is frozen" reads at a
+    // glance without checking the tiny status badge
+    const isFrozen = !m.dying && nowDrawMonsters < m.slowUntil && m.slowFactor <= 0.06;
+    if (isFrozen) {
+      ctx.beginPath();
+      ctx.arc(m.x, my, radius, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(191,227,245,0.55)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(120,190,225,0.85)'; ctx.lineWidth = 1.5; ctx.stroke();
+    }
+    // stunned: a couple of small dots orbiting the head — classic "stunned" cue
+    if (!m.dying && nowDrawMonsters < m.stunUntil) {
+      const orbitR = radius + 7;
+      for (let oi = 0; oi < 2; oi++) {
+        const a = nowDrawMonsters / 160 + oi * Math.PI;
+        const ox = m.x + Math.cos(a) * orbitR;
+        const oy = my - radius - 4 + Math.sin(a) * (orbitR * 0.35);
+        ctx.beginPath();
+        ctx.arc(ox, oy, 2.2, 0, Math.PI * 2);
+        ctx.fillStyle = '#c9a227';
+        ctx.fill();
+      }
+    }
     // hp bar
     const w = radius * 2.2;
     const pct = Math.max(0, m.hp / m.maxHp);
     ctx.fillStyle = 'rgba(0,0,0,0.15)';
-    ctx.fillRect(m.x - w / 2, m.y - radius - 9, w, 5);
+    ctx.fillRect(m.x - w / 2, my - radius - 9, w, 5);
     ctx.fillStyle = pct > 0.5 ? '#2fa85a' : pct > 0.2 ? '#bd9530' : '#c1465f';
-    ctx.fillRect(m.x - w / 2, m.y - radius - 9, w * pct, 5);
+    ctx.fillRect(m.x - w / 2, my - radius - 9, w * pct, 5);
+
+    // active status icons (slow/debuff currently applied to this monster)
+    const nowTs = nowDrawMonsters;
+    const activeIcons = [];
+    if (!m.dying && nowTs < m.slowUntil) activeIcons.push({ name: 'frost', color: '#3f5fbf', stacks: m.frostStacks || 0 });
+    if (!m.dying && nowTs < m.debuffUntil) activeIcons.push({ name: 'debuff', color: '#c1465f' });
+    if (!m.dying && m.dots && m.dots.length > 0) activeIcons.push({ name: 'sparkle', color: '#c17a41' });
+    if (!m.dying && nowTs < m.stunUntil) activeIcons.push({ name: 'stun', color: '#c9a227' });
+    activeIcons.forEach((icon, i) => {
+      const bx = m.x - radius - 2 + i * 13;
+      const by = my + radius + 8;
+      ctx.beginPath(); ctx.arc(bx, by, 6.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffffff'; ctx.fill();
+      ctx.strokeStyle = icon.color; ctx.lineWidth = 1.3; ctx.stroke();
+      drawGlyph(ctx, icon.name, bx, by, 4.5, icon.color);
+      // frost stack count: the user's favorite mechanic, so make the stack progress
+      // toward the 3-stack freeze clearly legible right on the badge
+      if (icon.stacks > 0) {
+        ctx.font = '800 7px sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath(); ctx.arc(bx + 5, by - 5, 4.2, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = icon.color; ctx.lineWidth = 1; ctx.stroke();
+        ctx.fillStyle = icon.color;
+        ctx.fillText(String(icon.stacks), bx + 5, by - 4.5);
+      }
+    });
+    ctx.restore();
   }
 
-  // hit particles
+  // hit particles: circles (default, soft radial-gradient glow) or angular shards
+  // (ice-shatter proc) — real polygon shapes instead of every effect reusing the
+  // same round dot, per-particle rotation for shards so they read as tumbling glass
   for (const pt of state.particles) {
-    const life = 1 - pt.t / pt.dur;
-    ctx.beginPath();
-    ctx.arc(pt.x, pt.y, pt.r * life, 0, Math.PI * 2);
-    ctx.fillStyle = pt.color;
-    ctx.globalAlpha = Math.max(0, life);
-    ctx.fill();
-    ctx.globalAlpha = 1;
+    const life = Math.max(0, 1 - Math.max(0, pt.t) / pt.dur);
+    if (life <= 0) continue;
+    const alpha = life;
+    if (pt.shape === 'shard') {
+      const rot = pt.rot + (pt.vrot || 0) * Math.max(0, pt.t);
+      const len = pt.r * (pt.elong || 1.8) * life;
+      const wid = pt.r * 0.6 * life;
+      ctx.save();
+      ctx.translate(pt.x, pt.y);
+      ctx.rotate(rot);
+      ctx.globalAlpha = alpha;
+      ctx.beginPath();
+      ctx.moveTo(len, 0);
+      ctx.lineTo(-len * 0.35, wid);
+      ctx.lineTo(-len * 0.35, -wid);
+      ctx.closePath();
+      ctx.fillStyle = pt.color;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+      ctx.lineWidth = 0.6;
+      ctx.stroke();
+      ctx.restore();
+    } else {
+      const r = pt.r * life;
+      const grad = ctx.createRadialGradient(pt.x, pt.y, 0, pt.x, pt.y, Math.max(0.6, r));
+      grad.addColorStop(0, hexToRgba(pt.color, alpha));
+      grad.addColorStop(1, hexToRgba(pt.color, 0));
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = grad;
+      ctx.fill();
+    }
   }
+  ctx.globalAlpha = 1;
 
   // floating damage numbers
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   for (const ft of state.floatingTexts) {
     const life = Math.max(0, 1 - ft.t / ft.dur);
-    const rise = (ft.crit ? 30 : 20) * (ft.t / ft.dur);
+    const riseT = Math.min(1, ft.t / ft.dur);
+    const rise = (ft.crit ? 30 : 20) * (1 - Math.pow(1 - riseT, 2)); // ease-out: quick then settles, instead of a constant-speed drift
     const pop = ft.crit ? 1 + 0.5 * Math.max(0, 1 - ft.t / 0.12) : 1;
     ctx.save();
     ctx.translate(ft.x, ft.y - rise);
     ctx.scale(pop, pop);
     ctx.globalAlpha = life;
-    if (ft.crit) {
+    if (ft.execute) {
+      // distinctive instant-kill callout, visually separate from a normal/crit number
+      // so an execute reads as its own feel-good moment
+      ctx.font = '900 21px sans-serif';
+      ctx.lineWidth = 4; ctx.strokeStyle = '#ffffff'; ctx.lineJoin = 'round';
+      ctx.strokeText(ft.value, 0, 0);
+      ctx.fillStyle = '#7b2f6b';
+      ctx.fillText(ft.value, 0, 0);
+    } else if (ft.crit) {
       ctx.font = '800 10px sans-serif';
       ctx.fillStyle = '#c1465f';
       ctx.fillText('CRITICAL', 0, -14);
@@ -1273,15 +1970,24 @@ function showScreen(name) {
 }
 
 let lastGold = state.gold, lastGems = state.gems, lastCoin = state.cardCoin;
-function syncCurrencyDisplays() {
-  const goldNow = Math.floor(state.gold);
-  HUD.gold.textContent = goldNow;
+let displayGold = state.gold; // ticks up/down smoothly toward state.gold instead of snapping
+// animate: true while running every frame on the game screen (wave-clear rewards etc.
+// read as a satisfying count-up); false everywhere else, where a per-frame loop isn't
+// driving this call anyway so an eased approach would just lag behind stale
+function syncCurrencyDisplays(animate) {
+  if (animate) {
+    displayGold += (state.gold - displayGold) * 0.2;
+    if (Math.abs(state.gold - displayGold) < 0.5) displayGold = state.gold;
+  } else {
+    displayGold = state.gold;
+  }
+  HUD.gold.textContent = Math.round(displayGold);
   if (HUD.collGem) HUD.collGem.textContent = state.gems;
   if (HUD.collCoin) HUD.collCoin.textContent = state.cardCoin;
-  if (goldNow > lastGold) pulseStat(HUD.goldStat);
+  if (state.gold > lastGold) pulseStat(HUD.goldStat);
   if (state.gems > lastGems) pulseStat(HUD.collGemStat);
   if (state.cardCoin > lastCoin) pulseStat(HUD.collCoinStat);
-  lastGold = goldNow; lastGems = state.gems; lastCoin = state.cardCoin;
+  lastGold = state.gold; lastGems = state.gems; lastCoin = state.cardCoin;
 }
 
 function render() {
@@ -1291,6 +1997,8 @@ function render() {
   if (state.screen === 'collection') renderCollectionScreen();
   if (state.screen === 'lab') renderLabScreen();
   if (typeof scheduleCloudSave === 'function') scheduleCloudSave();
+  scheduleLocalSave();
+  saveRunSnapshot();
 }
 
 function renderHome() {
@@ -1301,16 +2009,59 @@ function renderHome() {
 // readouts actually count down live instead of freezing between UI interactions
 function updateHud() {
   HUD.wave.textContent = state.wave;
-  HUD.swarm.textContent = `${state.monsters.length}/50`;
+  // dying (fading-out) monsters are cosmetic leftovers, not part of the live swarm count
+  const aliveCount = state.monsters.reduce((n, m) => n + (m.dying ? 0 : 1), 0);
+  HUD.swarm.textContent = `${aliveCount}/50`;
   HUD.timer.textContent = state.phase === 'wave' ? Math.max(0, Math.ceil(state.waveTimer)) + 's' : '--';
   const isBossWave = state.wave > 0 && state.wave % 10 === 0;
   HUD.timerStat.classList.toggle('boss-wave', isBossWave && state.phase === 'wave');
   HUD.timerStat.classList.toggle('urgent', isBossWave && state.phase === 'wave' && state.waveTimer <= 8 && state.bossAliveThisWave);
   // early warning before the 50-monster instant game-over, mirroring the boss-timer urgency cue
-  HUD.swarmStat.classList.toggle('urgent', state.monsters.length >= 40);
-  syncCurrencyDisplays();
+  HUD.swarmStat.classList.toggle('urgent', aliveCount >= 40);
+  syncCurrencyDisplays(true);
   const summonBtn = document.getElementById('summonBtn');
-  if (summonBtn) summonBtn.disabled = state.gold < 10 || state.activeDeck.length === 0 || state.phase === 'gameover';
+  if (summonBtn) {
+    summonBtn.disabled = state.gold < 10 || state.activeDeck.length === 0
+      || state.phase === 'idle' || state.phase === 'gameover' || state.bench.length >= BENCH_MAX;
+    summonBtn.title = state.activeDeck.length === 0 ? '카드함에서 덱을 먼저 구성하세요'
+      : state.bench.length >= BENCH_MAX ? '대기 유닛이 가득 찼습니다'
+      : state.gold < 10 ? '골드가 부족합니다'
+      : '';
+  }
+}
+
+const TIERS_BY_ID = {};
+for (const t of TIERS) TIERS_BY_ID[t.id] = t;
+
+// rebuilds the in-run "유닛 강화" list. Called on every interaction-driven render()
+// (immediate/unthrottled — infrequent) AND, separately, on a throttle from the main
+// loop (so a button disabled for lack of gold still flips to enabled within ~250ms
+// of gold passively crossing the cost threshold mid-wave, without rebuilding this
+// DOM from scratch 60 times a second, which was a real perf regression)
+function renderUpgradeList() {
+  if (state.screen !== 'game') return;
+  const gdl = document.getElementById('gameDeckList');
+  if (!gdl) return;
+  gdl.innerHTML = '';
+  state.activeDeck.forEach(defId => {
+    const def = UNIT_DEFS_BY_ID[defId];
+    const tier = TIERS_BY_ID[def.tierId];
+    const rl = state.runUpgrades[defId] || 0;
+    const cost = runUpgradeCost(rl);
+    const maxed = rl >= RUN_UPGRADE_MAX_LEVEL;
+    const row = document.createElement('div');
+    row.className = 'upgradeRow';
+    row.innerHTML = `
+      <span class="upgradeIcon" style="color:${tier.color}">${svgIcon(def.icon, 18)}</span>
+      <div class="upgradeName">${def.name}${rl > 0 ? ` <span class="lvlTag">+${rl}</span>` : ''}</div>
+      <button class="upgradeBtn" ${maxed || state.gold < cost || state.phase === 'gameover' ? 'disabled' : ''} title="${maxed ? '이번 판 최대 강화입니다' : state.gold < cost ? '골드가 부족합니다' : ''}">${maxed ? 'MAX' : `+${cost}G`}</button>
+    `;
+    row.querySelector('.upgradeBtn').onclick = () => upgradeRunType(defId);
+    gdl.appendChild(row);
+  });
+  if (state.activeDeck.length === 0) {
+    gdl.innerHTML = '<div class="hint">덱이 비어 있습니다. 카드함에서 덱을 구성하세요.</div>';
+  }
 }
 
 function renderGame() {
@@ -1330,27 +2081,7 @@ function renderGame() {
     bench.appendChild(div);
   });
 
-  const gdl = document.getElementById('gameDeckList');
-  gdl.innerHTML = '';
-  state.activeDeck.forEach(defId => {
-    const def = UNIT_DEFS_BY_ID[defId];
-    const tier = TIERS.find(t => t.id === def.tierId);
-    const rl = state.runUpgrades[defId] || 0;
-    const cost = runUpgradeCost(rl);
-    const maxed = rl >= RUN_UPGRADE_MAX_LEVEL;
-    const row = document.createElement('div');
-    row.className = 'upgradeRow';
-    row.innerHTML = `
-      <span class="upgradeIcon" style="color:${tier.color}">${svgIcon(def.icon, 18)}</span>
-      <div class="upgradeName">${def.name}${rl > 0 ? ` <span class="lvlTag">+${rl}</span>` : ''}</div>
-      <button class="upgradeBtn" ${maxed || state.gold < cost || state.phase === 'gameover' ? 'disabled' : ''}>${maxed ? 'MAX' : `+${cost}G`}</button>
-    `;
-    row.querySelector('.upgradeBtn').onclick = () => upgradeRunType(defId);
-    gdl.appendChild(row);
-  });
-  if (state.activeDeck.length === 0) {
-    gdl.innerHTML = '<div class="hint">덱이 비어 있습니다. 카드함에서 덱을 구성하세요.</div>';
-  }
+  renderUpgradeList();
 
   const selEl = document.getElementById('selectedInfo');
   const sellBtn = document.getElementById('sellBtn');
@@ -1366,6 +2097,13 @@ function renderGame() {
         { label: '치피', value: stats.critDmg.toFixed(0) + '%' },
       ];
       if (stats.bossDmg) statCells.push({ label: '보스피해', value: stats.bossDmg.toFixed(0) + '%' });
+      const sub = SUBTYPES[def.subKey];
+      const traitClass = sub.cc ? 'cc' : sub.debuff ? 'debuff' : sub.support ? 'support' : '';
+      const traitIcon = sub.cc ? 'frost' : sub.debuff ? 'debuff' : sub.support ? 'buff' : sub.icon;
+      // currently buffed right now? shown as one compact badge — the field itself
+      // (canvas pulsing ring, see draw()) is the primary indicator; this is just a
+      // quick-glance confirmation, not a restatement of everything the buff grants
+      const isBuffedNow = !!inst.buffs || (state.allyBuff && performance.now() < state.allyBuff.until);
       selEl.innerHTML = `
         <div class="unitHead">
           <span class="unitIcon" style="color:${grade.color}">${svgIcon(def.icon, 22)}</span>
@@ -1374,6 +2112,8 @@ function renderGame() {
             <div class="unitSub"><span class="gradePill" style="background:${grade.color}">${inst.grade}</span>${lvl > 0 ? `<span class="lvlTag">+${lvl}</span>` : ''}</div>
           </div>
         </div>
+        <div class="subDesc${traitClass ? ' ' + traitClass : ''}">${svgIcon(traitIcon, 11)}<span>${sub.short}</span></div>
+        ${isBuffedNow ? `<div class="activeEffectsRow"><div class="activeEffectTag">${svgIcon('buff', 12)}<span>버프 받는 중</span></div></div>` : ''}
         <div class="statGrid">
           ${statCells.map(s => `<div class="statCell"><small>${s.label}</small><b>${s.value}</b></div>`).join('')}
         </div>
@@ -1389,8 +2129,24 @@ function renderGame() {
 }
 
 function renderCollectionScreen() {
-  document.getElementById('gachaNormalBtn').disabled = state.cardCoin < GACHA_NORMAL_COST;
-  document.getElementById('gachaGemBtn').disabled = state.gems < GACHA_GEM_COST;
+  const gachaNormalBtn = document.getElementById('gachaNormalBtn');
+  const gachaGemBtn = document.getElementById('gachaGemBtn');
+  const gachaBulkNormalBtn = document.getElementById('gachaBulkNormalBtn');
+  gachaNormalBtn.disabled = state.cardCoin < GACHA_NORMAL_COST;
+  gachaNormalBtn.title = gachaNormalBtn.disabled ? '카드코인이 부족합니다' : '';
+  gachaGemBtn.disabled = state.gems < GACHA_GEM_COST;
+  gachaGemBtn.title = gachaGemBtn.disabled ? '특수재화가 부족합니다' : '';
+  gachaBulkNormalBtn.disabled = state.cardCoin < GACHA_NORMAL_COST * GACHA_BULK_COUNT;
+  gachaBulkNormalBtn.title = gachaBulkNormalBtn.disabled ? '카드코인이 부족합니다' : '';
+  const bulkEnhanceBtn = document.getElementById('bulkEnhanceBtn');
+  if (bulkEnhanceBtn) {
+    const anyEnhanceable = ownedDefIdList().some(defId => {
+      const entry = state.collection[defId];
+      return entry.level < ENHANCE_MAX_LEVEL && entry.count >= enhanceRequirement(entry.level);
+    });
+    bulkEnhanceBtn.disabled = !anyEnhanceable;
+    bulkEnhanceBtn.title = anyEnhanceable ? '' : '강화 가능한 카드가 없습니다';
+  }
 
   const locked = isRunLocked();
   const deckFull = state.activeDeck.length >= DECK_SIZE;
@@ -1414,7 +2170,7 @@ function renderCollectionScreen() {
     slot.className = 'deckSlot' + (defId ? ' filled' : '') + (locked ? ' locked' : '');
     if (defId) {
       const def = UNIT_DEFS_BY_ID[defId];
-      const tier = TIERS.find(t => t.id === def.tierId);
+      const tier = TIERS_BY_ID[def.tierId];
       slot.style.borderColor = tier.color;
       slot.innerHTML = `<span style="color:${tier.color}">${svgIcon(def.icon, 16)}</span><div class="cname">${def.name}</div>${locked ? '' : `<div class="removeX">${svgIcon('x', 8)}</div>`}`;
       if (!locked) slot.onclick = () => toggleDeckCard(defId);
@@ -1443,7 +2199,7 @@ function renderCollectionScreen() {
   });
   owned.forEach(defId => {
     const def = UNIT_DEFS_BY_ID[defId];
-    const tier = TIERS.find(t => t.id === def.tierId);
+    const tier = TIERS_BY_ID[def.tierId];
     const entry = state.collection[defId];
     const req = enhanceRequirement(entry.level);
     const canEnhance = entry.level < ENHANCE_MAX_LEVEL && entry.count >= req;
@@ -1451,22 +2207,29 @@ function renderCollectionScreen() {
     const inDeck = state.activeDeck.includes(defId);
     const unaddable = !inDeck && deckFull && !locked;
     const div = document.createElement('div');
-    div.className = 'collCard' + (isHighTier ? ' foil' : '') + (inDeck ? ' inDeck' : '') + (locked ? ' locked' : '') + (unaddable ? ' unaddable' : '');
+    div.className = 'collCard' + (isHighTier ? ' foil' : '') + (inDeck ? ' inDeck' : '') + (locked ? ' locked' : '') + (unaddable ? ' unaddable' : '') + (canEnhance ? ' canEnhance' : '');
     div.style.borderColor = tier.color;
     div.style.boxShadow = `0 0 0 1px ${hexToRgba(tier.color, 0.2)}, 0 0 16px ${hexToRgba(tier.color, isHighTier ? 0.4 : 0.15)}`;
     const stats = previewCardStats(defId);
+    // trait badge: what kind of crowd-control/debuff/buff this unit applies, plus a
+    // plain-text description of the actual effect — a hover-only title tooltip isn't
+    // visible on touch devices and didn't say WHAT the effect does, just its category
+    const sub = SUBTYPES[def.subKey];
+    const traitClass = sub.cc ? 'cc' : sub.debuff ? 'debuff' : sub.support ? 'support' : '';
+    const traitIcon = sub.cc ? 'frost' : sub.debuff ? 'debuff' : sub.support ? 'buff' : sub.icon;
     div.innerHTML = `
       ${inDeck ? '<div class="deckBadge">덱 등록됨</div>' : ''}
       <div class="collIcon" style="color:${tier.color}">${svgIcon(def.icon, 30)}</div>
       <div class="collName" style="color:${tier.color}">${def.name}</div>
       <div class="collSub">${SUBTYPES[def.subKey].name}</div>
+      <div class="subDesc${traitClass ? ' ' + traitClass : ''}">${svgIcon(traitIcon, 11)}<span>${sub.desc}</span></div>
       <div class="collStats">
         <div><small>공격</small><b>${stats.atk.toFixed(1)}</b></div>
         <div><small>사거리</small><b>${stats.range.toFixed(2)}</b></div>
         <div><small>공속</small><b>${stats.aspd.toFixed(2)}</b></div>
       </div>
       <div class="collRow">보유 <b>${entry.count}</b>장 &nbsp;Lv.${entry.level}${entry.level >= ENHANCE_MAX_LEVEL ? ' (MAX)' : ''}</div>
-      <button class="enhanceBtn" ${canEnhance ? '' : 'disabled'}>${entry.level >= ENHANCE_MAX_LEVEL ? '최대 강화' : `강화 (${entry.count}/${req})`}</button>
+      <button class="enhanceBtn" ${canEnhance ? '' : 'disabled'} title="${entry.level >= ENHANCE_MAX_LEVEL ? '최대 레벨입니다' : canEnhance ? '' : `카드 ${req - entry.count}장이 더 필요합니다`}">${entry.level >= ENHANCE_MAX_LEVEL ? '최대 강화' : `강화 (${entry.count}/${req})`}</button>
     `;
     div.addEventListener('click', (e) => {
       if (e.target.closest('.enhanceBtn')) return;
@@ -1493,6 +2256,8 @@ function renderLabScreen() {
 
   document.getElementById('labTokenLabel').textContent = tokens;
   document.getElementById('labTokenSubLabel').textContent = `${subInfo.name} 토큰`;
+  const masteryLabel = document.getElementById('labMasteryLabel');
+  if (masteryLabel) masteryLabel.textContent = state.masteryPoints || 0;
 
   // subtype selector tabs
   const tabWrap = document.getElementById('labSubTabs');
@@ -1520,7 +2285,7 @@ function renderLabScreen() {
       const level = labNodeLevel(subKey, nodeId);
       const unlocked = labNodeUnlocked(subKey, node);
       const cost = labNodeCost(level);
-      const canAfford = unlocked && tokens >= cost;
+      const canAfford = unlocked && (tokens + (state.masteryPoints || 0)) >= cost;
       const isActive = node.type === 'active';
       const card = document.createElement('div');
       card.className = 'labNode' + (isActive ? ' skillNode' : '') + (unlocked ? '' : ' locked') + (level > 0 ? ' active' : '');
@@ -1538,7 +2303,7 @@ function renderLabScreen() {
         <div class="labNodeName">${node.name}${isActive ? ' <span class="labSkillTag">스킬</span>' : ''}</div>
         <div class="labNodeEffect">${effectLine}</div>
         <div class="labNodeLevel">Lv.${level}</div>
-        <button class="labNodeBtn" ${canAfford ? '' : 'disabled'}>${unlocked ? `강화 (${cost} 토큰)` : `Lv.${node.requires.level} 필요`}</button>
+        <button class="labNodeBtn" ${canAfford ? '' : 'disabled'} title="${unlocked ? (canAfford ? '' : '토큰이 부족합니다') : `${node.requires.level}레벨을 먼저 해금하세요`}">${unlocked ? `강화 (${cost} 토큰)` : `Lv.${node.requires.level} 필요`}</button>
       `;
       card.querySelector('.labNodeBtn').onclick = () => upgradeLabNode(subKey, nodeId);
       rowEl.appendChild(card);
@@ -1553,6 +2318,20 @@ function renderLabScreen() {
 document.addEventListener('contextmenu', (e) => e.preventDefault());
 document.addEventListener('dragstart', (e) => e.preventDefault());
 document.addEventListener('selectstart', (e) => { if (!e.target.closest('input, textarea')) e.preventDefault(); });
+
+// iOS Safari (especially as a bookmarked/home-screen app) double-tap-to-zoom and
+// pinch-to-zoom gestures otherwise blow up the layout and leave text selectable
+// underneath; touch-action:manipulation (CSS) covers most of this, but Safari's
+// own non-standard gesture events need to be blocked directly too
+document.addEventListener('gesturestart', (e) => e.preventDefault());
+document.addEventListener('gesturechange', (e) => e.preventDefault());
+document.addEventListener('gestureend', (e) => e.preventDefault());
+let lastTouchEnd = 0;
+document.addEventListener('touchend', (e) => {
+  const now = Date.now();
+  if (now - lastTouchEnd <= 350) e.preventDefault();
+  lastTouchEnd = now;
+}, { passive: false });
 
 canvas.addEventListener('click', (e) => {
   if (state.phase === 'idle' || state.phase === 'gameover') return;
@@ -1571,6 +2350,8 @@ document.getElementById('sellBtn').onclick = sellSelected;
 document.getElementById('bulkSellBtn').onclick = bulkSell;
 document.getElementById('gachaNormalBtn').onclick = gachaNormal;
 document.getElementById('gachaGemBtn').onclick = gachaGem;
+document.getElementById('gachaBulkNormalBtn').onclick = gachaBulkNormal;
+document.getElementById('bulkEnhanceBtn').onclick = bulkEnhanceAll;
 document.getElementById('startBtn').onclick = () => {
   document.getElementById('startRow').classList.add('hidden');
   state.gold = 50; // the real run-start reset: whatever was spent/left over before this click doesn't matter
@@ -1605,14 +2386,37 @@ function applyStaticIcons() {
   });
 }
 
+// flush pending saves immediately on backgrounding/close — the debounce timer used
+// during normal play may not get a chance to fire before iOS reclaims the tab
+function flushSaves() {
+  clearTimeout(saveTimer);
+  saveLocalProgress();
+  saveRunSnapshot();
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushSaves(); });
+window.addEventListener('pagehide', flushSaves);
+
 function init() {
-  for (const defId of startingDeck()) {
-    state.collection[defId] = { count: 1, level: 0 };
-    state.activeDeck.push(defId);
+  loadLocalProgress();
+  if (Object.keys(state.collection).length === 0) {
+    // fresh install / first ever play: seed the starter deck
+    for (const defId of startingDeck()) {
+      state.collection[defId] = { count: 1, level: 0 };
+      state.activeDeck.push(defId);
+    }
   }
   updateDeckBonus();
   applyStaticIcons();
-  render();
+  // tryRestoreRunSnapshot() MUST run before this initial render(): render() always
+  // calls saveRunSnapshot() at its end, and while state.screen is still the default
+  // 'home' (before a restore has had a chance to flip it to 'game'), that guard
+  // deletes RUN_SNAPSHOT_KEY outright — wiping the very snapshot we're about to try
+  // to read. That made the "resume mid-run after reload" feature silently no-op on
+  // every real page load even though it worked fine when tested by calling
+  // tryRestoreRunSnapshot() manually mid-session. tryRestoreRunSnapshot() renders
+  // itself (via showScreen) when it restores, so only fall back to a plain render()
+  // when there was nothing to restore.
+  if (!tryRestoreRunSnapshot()) render();
 }
 init();
 requestAnimationFrame(loop);

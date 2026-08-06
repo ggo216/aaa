@@ -2,7 +2,12 @@
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="AAA">
+<meta name="format-detection" content="telephone=no">
 <title>AAA</title>
 <link rel="preconnect" href="https://cdn.jsdelivr.net">
 <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css">
@@ -143,11 +148,14 @@
         <div class="panelTitle"><span class="ptIcon" data-icon="dice"></span>카드 뽑기</div>
         <button id="gachaNormalBtn">일반 뽑기 (15 카드코인)</button>
         <button id="gachaGemBtn">고급 뽑기 (5 특수재화)</button>
+        <button id="gachaBulkNormalBtn" class="ghostBtn">일반 뽑기 10연 (150 카드코인)</button>
       </div>
     </div>
 
     <div class="panelBlock" id="collectionListPanel">
-      <div class="panelTitle"><span class="ptIcon" data-icon="folder"></span>보유 카드 전체</div>
+      <div class="panelTitle"><span class="ptIcon" data-icon="folder"></span>보유 카드 전체
+        <button id="bulkEnhanceBtn" class="bulkEnhanceBtn">일괄 강화</button>
+      </div>
       <div id="collectionList" class="collGrid"></div>
     </div>
   </section>
@@ -161,6 +169,7 @@
         <div class="brandSub">SKILL TREE</div>
       </div>
       <div class="stat coin"><span class="statBadge" data-icon="flask"></span><div class="statText"><b id="labTokenLabel">0</b><small id="labTokenSubLabel">토큰</small></div></div>
+      <div class="stat gem"><span class="statBadge" data-icon="gem"></span><div class="statText"><b id="labMasteryLabel">0</b><small>공용 마스터리</small></div></div>
       <button class="navBtn ghostNav" id="labCollBtn" data-icon="folder" title="카드함으로"></button>
     </header>
 

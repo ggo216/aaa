@@ -32,6 +32,10 @@ const ICON_DOM = {
   bolt: '<polygon points="13,2 4,14 11,14 9,22 20,9 12,9" fill="currentColor" stroke="none" fill-rule="evenodd"/>',
   plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
   flask: '<path d="M9 3 h6 M10 3 v6 L5 18 a2 2 0 0 0 2 3 h10 a2 2 0 0 0 2 -3 L14 9 V3" fill="none"/><path d="M7.5 14 h9" fill="none"/><circle cx="12" cy="17" r="1.1" fill="currentColor" stroke="none"/>',
+  fire: '<path d="M12 2 C8 7 6 10 6 14 a6 6 0 0 0 12 0 c0 -2.2 -1.1 -3.8 -2.1 -4.8 c0.1 2 -1.3 3.1 -2.3 2.1 C15 9 13 6 12 2 Z" fill="currentColor" stroke="none" fill-rule="evenodd"/>',
+  turret: '<rect x="7" y="13" width="10" height="7" rx="1.5"/><rect x="10" y="4" width="4" height="10" rx="1.5"/><circle cx="12" cy="4" r="2"/>',
+  stun: '<path d="M12 3 L13.6 8.6 L19 7.2 L15.2 11.4 L19 15.6 L13.6 14.2 L12 20 L10.4 14.2 L5 15.6 L8.8 11.4 L5 7.2 L10.4 8.6 Z" fill="currentColor" stroke="none" fill-rule="evenodd"/>',
+  skull: '<circle cx="12" cy="10" r="7"/><circle cx="9" cy="10" r="1.4" fill="currentColor" stroke="none"/><circle cx="15" cy="10" r="1.4" fill="currentColor" stroke="none"/><path d="M8 20 v-3 M12 20 v-3 M16 20 v-3" fill="none"/>',
 };
 
 function svgIcon(name, size = 18, color = 'currentColor') {
@@ -89,6 +93,38 @@ function drawGlyph(ctx, name, cx, cy, r, color) {
     case 'buff':
       ctx.arc(0, 0, 8.5, 0, Math.PI * 2); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(-4, 2); ctx.lineTo(0, -3); ctx.lineTo(4, 2); ctx.stroke();
+      break;
+    case 'fire':
+      ctx.moveTo(0, -9);
+      ctx.quadraticCurveTo(6, -1, 3, 5);
+      ctx.quadraticCurveTo(6, 2, 4, 8);
+      ctx.quadraticCurveTo(0, 10, -4, 8);
+      ctx.quadraticCurveTo(-6, 2, -3, 5);
+      ctx.quadraticCurveTo(-6, -1, 0, -9);
+      ctx.closePath();
+      ctx.fill();
+      break;
+    case 'turret':
+      ctx.rect(-5, 2, 10, 6); ctx.fill();
+      ctx.beginPath(); ctx.rect(-2, -6, 4, 9); ctx.fill();
+      ctx.beginPath(); ctx.arc(0, -6, 2.2, 0, Math.PI * 2); ctx.fill();
+      break;
+    case 'stun': {
+      const pts = 5, outerR = 9, innerR = 3.6;
+      for (let i = 0; i < pts * 2; i++) {
+        const a = (Math.PI / pts) * i - Math.PI / 2;
+        const rr = i % 2 === 0 ? outerR : innerR;
+        const px = Math.cos(a) * rr, py = Math.sin(a) * rr;
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fill();
+      break;
+    }
+    case 'skull':
+      ctx.arc(0, -2, 7, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(-3, -2, 1.4, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(3, -2, 1.4, 0, Math.PI * 2); ctx.fill();
       break;
     default:
       ctx.arc(0, 0, 6, 0, Math.PI * 2); ctx.stroke();

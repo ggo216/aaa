@@ -47,6 +47,9 @@ async function loadCloudProgress() {
       if (typeof data.bestWave === 'number') state.bestWave = Math.max(state.bestWave, data.bestWave);
       if (typeof data.gems === 'number') state.gems = data.gems;
       if (typeof data.cardCoin === 'number') state.cardCoin = data.cardCoin;
+      if (data.labTokens) state.labTokens = data.labTokens;
+      if (data.labProgress) state.labProgress = data.labProgress;
+      if (typeof data.masteryPoints === 'number') state.masteryPoints = data.masteryPoints;
       updateDeckBonus();
       applyingCloudData = false;
       setCloudStatus(`${currentUser.displayName || currentUser.email} 님으로 동기화됨`);
@@ -70,6 +73,9 @@ async function saveCloudProgress() {
       bestWave: state.bestWave,
       gems: state.gems,
       cardCoin: state.cardCoin,
+      labTokens: state.labTokens,
+      labProgress: state.labProgress,
+      masteryPoints: state.masteryPoints,
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
     }, { merge: true });
   } catch (e) {
