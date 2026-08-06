@@ -324,6 +324,16 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .deckSlot .removeX { position: absolute; top: 2px; right: 2px; width: 13px; height: 13px; border-radius: 50%; background: rgba(0,0,0,0.08); display: flex; align-items: center; justify-content: center; color: var(--text-dim); z-index: 2; }
 .deckSlot .removeX svg { width: 8px; height: 8px; }
 
+/* one-tap sell badge on bench cards — sells the unit directly without needing to
+   select it first and reach for a separate 판매 button */
+.benchSellX {
+  position: absolute; top: 3px; right: 3px; width: 16px; height: 16px; border-radius: 50%;
+  background: #f7f0da; color: #a5822f; display: flex; align-items: center; justify-content: center;
+  z-index: 2; transition: transform 0.1s ease, background 0.15s ease;
+}
+.benchSellX:hover { background: #f0e4bc; transform: scale(1.12); }
+.benchSellX svg { width: 9px; height: 9px; }
+
 .setBonusInfo { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
 .setBonusRow {
   display: flex; align-items: center; gap: 8px; font-size: 11.5px; font-weight: 700; color: var(--text);

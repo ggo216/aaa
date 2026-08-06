@@ -11,7 +11,7 @@
 <title>AAA</title>
 <link rel="preconnect" href="https://cdn.jsdelivr.net">
 <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css">
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=20260806">
 </head>
 <body>
 <div id="app">
@@ -45,6 +45,8 @@
   <section id="gameScreen" class="screen hidden">
     <header id="topbar">
       <button class="navBtn" id="gameHomeBtn" data-icon="home" title="홈으로"></button>
+      <button class="navBtn" id="gameCollBtn" data-icon="folder" title="카드함"></button>
+      <button class="navBtn" id="gameLabBtn" data-icon="flask" title="연구실"></button>
       <div class="brandWrap">
         <div class="brand">AAA</div>
         <div class="brandSub">TOWER DEFENSE</div>
@@ -114,7 +116,6 @@
         <div class="panelBlock" id="upgradeBlock">
           <div class="panelTitle"><span class="ptIcon" data-icon="bolt"></span>유닛 강화</div>
           <div id="gameDeckList" class="upgradeList"></div>
-          <button id="gotoCollectionBtn" class="ghostBtn">카드함 보기</button>
         </div>
       </aside>
     </main>
@@ -186,10 +187,10 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
-<script src="firebase-config.js"></script>
-<script src="icons.js"></script>
-<script src="data.js"></script>
-<script src="game.js"></script>
-<script src="cloud.js"></script>
+<script src="firebase-config.js?v=20260806"></script>
+<script src="icons.js?v=20260806"></script>
+<script src="data.js?v=20260806"></script>
+<script src="game.js?v=20260806"></script>
+<script src="cloud.js?v=20260806"></script>
 </body>
 </html>

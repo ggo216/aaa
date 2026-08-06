@@ -311,7 +311,7 @@ function upgradeRunType(defId) {
   state.gold -= cost;
   state.runUpgrades[defId] = lvl + 1;
   const def = UNIT_DEFS_BY_ID[defId];
-  log(`${def.name} 인게임 강화! Lv.${lvl + 1} (이번 판에만 적용)`);
+  log(`${def.name} 인게임 강화! Lv.${lvl + 1}`);
   render();
 }
 
@@ -682,7 +682,7 @@ function acquireCard(pool) {
     log(`새 카드 획득: ${def.name} (${def.variant})`);
   } else {
     state.collection[def.id].count += 1;
-    log(`중복 카드 획득: ${def.name} (보유 ${state.collection[def.id].count}장, 강화 재료로 사용 가능)`);
+    log(`중복 카드 획득: ${def.name} (보유 ${state.collection[def.id].count}장)`);
   }
 }
 
@@ -728,7 +728,7 @@ function gachaGem() {
 
 function summonUnit() {
   if (state.gold < 10 || state.activeDeck.length === 0 || state.phase === 'idle' || state.phase === 'gameover') return;
-  if (state.bench.length >= BENCH_MAX) { log(`대기 유닛은 최대 ${BENCH_MAX}칸까지입니다. 필드에 배치하거나 판매하세요`); render(); return; }
+  if (state.bench.length >= BENCH_MAX) { log(`대기 유닛은 최대 ${BENCH_MAX}칸까지입니다`); render(); return; }
   state.gold -= 10;
   const defId = state.activeDeck[Math.floor(Math.random() * state.activeDeck.length)];
   const grade = rollGrade();
@@ -828,6 +828,21 @@ function sellSelected() {
   render();
 }
 
+// sells a bench unit directly (its own small × badge on the card), without needing to
+// select it first and hit the separate 판매 button — a card only ever sits in the
+// bench waiting to be placed or sold, so a one-tap sell here saves a redundant step
+function sellBenchUnit(idx) {
+  const inst = state.bench[idx];
+  if (!inst) return;
+  state.bench.splice(idx, 1);
+  state.gold += GRADE_SELL_PRICE[inst.grade];
+  if (state.selected && state.selected.kind === 'bench') {
+    if (state.selected.idx === idx) state.selected = null;
+    else if (state.selected.idx > idx) state.selected.idx -= 1;
+  }
+  render();
+}
+
 function bulkSell() {
   const rank = GRADES.map(g => g.id);
   const maxIdx = rank.indexOf(BULK_SELL_MAX_GRADE);
@@ -854,8 +869,13 @@ function bulkSell() {
 function dist(ax, ay, bx, by) { return Math.hypot(ax - bx, ay - by); }
 
 function updateSupportBuffs() {
-  for (const inst of Object.values(state.placed)) inst.buffs = null;
-  const supports = Object.entries(state.placed).filter(([k, inst]) => defOf(inst).base.support);
+  // computed once and reused for both the outer supports scan and the inner per-target
+  // scan below — this used to call Object.entries(state.placed) fresh inside the outer
+  // loop (once per support unit), allocating a whole new array of every placed unit
+  // O(supports * placedCount) times per combat tick instead of just once
+  const allPlaced = Object.entries(state.placed);
+  for (const [, inst] of allPlaced) inst.buffs = null;
+  const supports = allPlaced.filter(([k, inst]) => defOf(inst).base.support);
   if (supports.length === 0) return;
   // 연구실 아우라 노드: buff_support 트리는 서브타입 공용이라 모든 지원형 유닛에 대해 한 번만 계산하면 된다
   const supportLab = computeLabBonus('buff_support');
@@ -867,7 +887,7 @@ function updateSupportBuffs() {
     const lvl = levelOf(sInst.defId);
     const runLvl = state.runUpgrades[sInst.defId] || 0;
     const power = (4 + (grade.mult - 1) * 6) * (1 + lvl * ENHANCE_STAT_BONUS.atk) * (1 + runLvl * RUN_UPGRADE_STAT_BONUS.atk);
-    for (const [k2, tInst] of Object.entries(state.placed)) {
+    for (const [k2, tInst] of allPlaced) {
       if (k2 === key) continue;
       const p2 = tInst.center; // cached at placement time — see placeUnitAt()
       if (supportStats.fullRange || dist(center.x, center.y, p2.x, p2.y) <= range) {
@@ -896,10 +916,33 @@ function findTargets(center, statsObj, count) {
   return inRange.slice(0, count);
 }
 
+// same targeting rules as findTargets(), but reads from an already range-filtered/
+// distance-sorted `pool` instead of re-scanning+re-filtering every monster on the field.
+// tickCombat's swing catch-up loop can call this several times per unit within a single
+// frame at high game-speed multipliers (dt covers more attack intervals -> more swings
+// resolved synchronously) — since monster POSITIONS never change mid-tickCombat (tickMonsters
+// already ran earlier this same loop() iteration), the in-range set and each candidate's
+// distance-to-attacker are both static for the whole tick, so recomputing dist() and
+// re-filtering the full monster list against range on every single swing was pure waste.
+// Only what genuinely changes between swings (hp, from earlier swings this same tick, and
+// dying status, from kills this same tick) is re-checked here.
+function findTargetsFromPool(pool, count) {
+  const live = pool.filter(m => !m.dying);
+  if (count <= 1) return live.slice(0, count); // pool is already distance-sorted, closest-first
+  live.sort((a, b) => a.hp - b.hp); // hp changes swing-to-swing, so this still needs a fresh sort
+  return live.slice(0, count);
+}
+
 // caps on transient VFX arrays: with splash/DoT/extra-attack now able to fire several
 // damage instances per frame (especially against the monster cluster near the nest),
-// uncapped growth here was a real source of frame drops during heavy combat
-const MAX_FLOATING_TEXTS = 90;
+// uncapped growth here was a real source of frame drops during heavy combat.
+// floatingTexts specifically was measured (draw() with/without the array, isolated via
+// stress test) as the single largest line item in per-frame draw cost — each one does a
+// save/translate/scale + a font change + strokeText (notably pricier than fillText on
+// canvas) + fillText + restore, and at heavy-combat volume the array was sitting at or
+// near its cap essentially every frame. Lowered from 90 to 55: still plenty of visible
+// damage feedback, but a meaningfully smaller fixed per-frame draw cost.
+const MAX_FLOATING_TEXTS = 55;
 const MAX_PARTICLES = 240;
 const MAX_PROJECTILES = 150;
 const MAX_ZONES = 14;
@@ -1343,32 +1386,44 @@ function tickCombat(dt) {
       // loop (capped) rather than a single if-check: at high game-speed multipliers a
       // single frame's dt can cover several of a fast unit's attack intervals, and only
       // ever allowing one attack per frame silently capped DPS well below what the
-      // unit's stats promise. Capped at 30 to avoid a pathological catch-up spiral.
+      // unit's stats promise. Capped at 30 to avoid a pathological catch-up spiral — in
+      // practice this never binds at realistic aspd values (verified via stress test:
+      // even at 10x speed with maxed-out attack speed investment, a frame's worth of
+      // swings tops out well under 30), so it's a safety valve, not the active bottleneck.
+      // What DOES scale with the multiplier is legitimate: more real attacks genuinely
+      // happen per rendered frame, which is required to preserve the promised DPS at
+      // fast-forward speeds — so the target-lookup itself is precomputed ONCE per unit per
+      // tick (see findTargetsFromPool) instead of once per swing, since monster positions
+      // are frozen for the rest of this tick regardless of how many swings resolve.
       let swings = 0;
-      while (inst.cooldown <= 0 && swings < 30) {
-        const targets = findTargets(center, stats, stats.targets);
-        if (targets.length === 0) { inst.cooldown = 0; break; }
-        inst.cooldown += interval;
-        swings++;
-        for (const m of targets) {
-          resolveHit(m, inst, stats, center);
-          // 추가 타격 (연구실): 확률로 한 번 더 공격. 원거리-단일(이중 사격)은 사거리와
-          // 무관하게 맵 전역의 무작위 대상에게 번개가 튀는 것으로 대체됨
-          if (stats.extraAtkChance > 0 && Math.random() * 100 < stats.extraAtkChance) {
-            if (def.subKey === 'ranged_single') {
-              // 이중 사격: 맞히는 무작위 대상의 "수"가 leafB(이중 사격) 투자 레벨에 따라
-              // 1에서 시작해 서서히 늘어남 (최대치로 캡되어 맵 전체를 쓸어버리지 않도록)
-              const leafBLvl = labNodeLevel('ranged_single', 'leafB');
-              const targetCount = Math.min(4, 1 + Math.floor(leafBLvl / 3));
-              const pool = state.monsters.filter(x => !x.dying && x !== m);
-              for (let i = 0; i < pool.length && i < targetCount; i++) {
-                const pickIdx = Math.floor(Math.random() * pool.length);
-                const bolt = pool.splice(pickIdx, 1)[0];
-                resolveHitLightning(bolt, inst, stats, center);
+      if (inst.cooldown <= 0) {
+        const rangePool = state.monsters.filter(m => !m.dying && (stats.fullRange || dist(center.x, center.y, m.x, m.y) <= stats.range * CELL));
+        if (stats.targets <= 1) rangePool.sort((a, b) => dist(center.x, center.y, a.x, a.y) - dist(center.x, center.y, b.x, b.y));
+        while (inst.cooldown <= 0 && swings < 30) {
+          const targets = findTargetsFromPool(rangePool, stats.targets);
+          if (targets.length === 0) { inst.cooldown = 0; break; }
+          inst.cooldown += interval;
+          swings++;
+          for (const m of targets) {
+            resolveHit(m, inst, stats, center);
+            // 추가 타격 (연구실): 확률로 한 번 더 공격. 원거리-단일(이중 사격)은 사거리와
+            // 무관하게 맵 전역의 무작위 대상에게 번개가 튀는 것으로 대체됨
+            if (stats.extraAtkChance > 0 && Math.random() * 100 < stats.extraAtkChance) {
+              if (def.subKey === 'ranged_single') {
+                // 이중 사격: 맞히는 무작위 대상의 "수"가 leafB(이중 사격) 투자 레벨에 따라
+                // 1에서 시작해 서서히 늘어남 (최대치로 캡되어 맵 전체를 쓸어버리지 않도록)
+                const leafBLvl = labNodeLevel('ranged_single', 'leafB');
+                const targetCount = Math.min(4, 1 + Math.floor(leafBLvl / 3));
+                const boltPool = state.monsters.filter(x => !x.dying && x !== m);
+                for (let i = 0; i < boltPool.length && i < targetCount; i++) {
+                  const pickIdx = Math.floor(Math.random() * boltPool.length);
+                  const bolt = boltPool.splice(pickIdx, 1)[0];
+                  resolveHitLightning(bolt, inst, stats, center);
+                }
+              } else {
+                const others = findTargetsFromPool(rangePool, targets.length + 1).filter(x => x !== m);
+                if (others.length > 0) resolveHit(others[0], inst, stats, center);
               }
-            } else {
-              const others = findTargets(center, stats, targets.length + 1).filter(x => x !== m);
-              if (others.length > 0) resolveHit(others[0], inst, stats, center);
             }
           }
         }
@@ -2121,8 +2176,9 @@ function renderGame() {
     div.className = 'card' + (state.selected && state.selected.kind === 'bench' && state.selected.idx === idx ? ' selected' : '') + (isHigh ? ' foil' : '');
     div.style.borderColor = grade.color;
     div.style.boxShadow = `0 0 0 1px ${hexToRgba(grade.color, 0.25)}, 0 0 14px ${hexToRgba(grade.color, isHigh ? 0.45 : 0.2)}`;
-    div.innerHTML = unitCardHtml(inst);
+    div.innerHTML = unitCardHtml(inst) + `<div class="benchSellX" title="즉시 판매 (${GRADE_SELL_PRICE[inst.grade]} 골드)">${svgIcon('coin', 10)}</div>`;
     div.onclick = () => placeFromBench(idx);
+    div.querySelector('.benchSellX').onclick = (e) => { e.stopPropagation(); sellBenchUnit(idx); };
     bench.appendChild(div);
   });
 
@@ -2294,7 +2350,47 @@ const LAB_EFFECT_LABELS = {
 };
 const LAB_ACTIVE_KIND_LABEL = { single: '단일 강타', aoe: '광역 폭발', freeze: '광역 빙결', curse: '광역 저주', ally: '전군 버프' };
 
+// safety-net reconciliation: recomputes what every subtype's labTokens balance and the
+// universal masteryPoints balance SHOULD be — "earned" derived from the collection's
+// current enhancement levels (2 per level, the only source of these points), "spent"
+// derived from labProgress's current node levels (summing labNodeCost() for each
+// unlocked level, subtype tokens drawn down before mastery — the same order
+// upgradeLabNode() itself enforces) — and tops up any shortfall it finds. It NEVER
+// lowers an existing balance, only raises one that's below what full correct
+// accounting implies. This exists because a player reported cards clearly above Lv.1
+// with 0 tokens/mastery showing — after this session's heavy iteration (many local
+// saves, a cloud merge-logic change, etc), some historical inconsistency between
+// "cards leveled up" and "points actually recorded" was possible even though the
+// current enhance/spend code is correct going forward. Cheap and idempotent, so it's
+// safe to just re-run on every lab screen visit rather than track down and be certain
+// about one specific historical cause.
+function reconcileLabPoints() {
+  let totalMasteryEarned = 0;
+  const earnedPerSub = {};
+  for (const defId of ownedDefIdList()) {
+    const entry = state.collection[defId];
+    const def = UNIT_DEFS_BY_ID[defId];
+    if (!entry || !def || !entry.level) continue;
+    earnedPerSub[def.subKey] = (earnedPerSub[def.subKey] || 0) + entry.level * 2;
+    totalMasteryEarned += entry.level * 2;
+  }
+  let totalMasterySpent = 0;
+  for (const sk of Object.keys(LAB_TREES)) {
+    let spent = 0;
+    for (const node of LAB_TREES[sk]) {
+      const lvl = labNodeLevel(sk, node.id);
+      for (let L = 0; L < lvl; L++) spent += labNodeCost(L);
+    }
+    const earned = earnedPerSub[sk] || 0;
+    const fromTokens = Math.min(earned, spent);
+    totalMasterySpent += spent - fromTokens;
+    state.labTokens[sk] = Math.max(state.labTokens[sk] || 0, Math.max(0, earned - spent));
+  }
+  state.masteryPoints = Math.max(state.masteryPoints || 0, Math.max(0, totalMasteryEarned - totalMasterySpent));
+}
+
 function renderLabScreen() {
+  reconcileLabPoints();
   const subKey = state.labSelectedSub;
   const tokens = state.labTokens[subKey] || 0;
   const subInfo = SUBTYPES[subKey];
@@ -2413,7 +2509,8 @@ document.querySelectorAll('.speedBtn').forEach(btn => {
 document.getElementById('goGameBtn').onclick = () => { resetRun(); showScreen('game'); };
 document.getElementById('goCollectionBtn').onclick = () => showScreen('collection');
 document.getElementById('gameHomeBtn').onclick = () => showScreen('home');
-document.getElementById('gotoCollectionBtn').onclick = () => showScreen('collection');
+document.getElementById('gameCollBtn').onclick = () => showScreen('collection');
+document.getElementById('gameLabBtn').onclick = () => showScreen('lab');
 document.getElementById('collHomeBtn').onclick = () => showScreen('home');
 document.getElementById('collGameBtn').onclick = () => showScreen('game');
 document.getElementById('goLabBtn').onclick = () => showScreen('lab');

@@ -32,20 +32,22 @@ const ENHANCE_MAX_LEVEL = 10;
 function enhanceRequirement(level) { return ENHANCE_BASE_COST + level * ENHANCE_COST_STEP; }
 
 // ---- Subtypes (4 categories -> 7 subtypes total) ----
+// range values were nerfed ~20% across the board (all subtypes, proportionally) —
+// units were covering too much of the field for too little investment
 const SUBTYPES = {
-  atk_single:   { cat: 'attack', name: '공격형-단일',   icon: 'slash',      range: 1.4, atk: 3.4, aspd: 1.0, targets: 1, splash: 0,
+  atk_single:   { cat: 'attack', name: '공격형-단일',   icon: 'slash',      range: 1.1, atk: 3.4, aspd: 1.0, targets: 1, splash: 0,
     desc: '가장 가까운 적 1명에게 강력한 단일 공격', short: '단일 강공격' },
-  atk_multi:    { cat: 'attack', name: '공격형-다중',   icon: 'multislash', range: 1.3, atk: 1.4, aspd: 1.0, targets: 4, splash: 0.9,
+  atk_multi:    { cat: 'attack', name: '공격형-다중',   icon: 'multislash', range: 1.0, atk: 1.4, aspd: 1.0, targets: 4, splash: 0.9,
     desc: '여러 적 동시 공격 + 스플래시, 확률로 더 큰 폭발 피해와 짧은 화면 흔들림', short: '다중 공격 + 대폭발 확률' },
-  magic_multi:  { cat: 'magic',  name: '마법형-다중',   icon: 'fire',       range: 2.2, atk: 1.1, aspd: 0.9, targets: 5, splash: 1.1,
+  magic_multi:  { cat: 'magic',  name: '마법형-다중',   icon: 'fire',       range: 1.8, atk: 1.1, aspd: 0.9, targets: 5, splash: 1.1,
     desc: '다수의 적에게 마법 공격 + 확률로 화상(지속피해)과 잔류 화염지대 생성', short: '화상 + 화염지대' },
-  magic_ctrl:   { cat: 'magic',  name: '마법형-제어',   icon: 'frost',      range: 2.1, atk: 0.6, aspd: 0.9, targets: 5, splash: 1.1, cc: true,
+  magic_ctrl:   { cat: 'magic',  name: '마법형-제어',   icon: 'frost',      range: 1.7, atk: 0.6, aspd: 0.9, targets: 5, splash: 1.1, cc: true,
     desc: '공격한 적을 둔화시킴, 서리 3중첩 시 강력한 결빙(1초)', short: '둔화, 3스택 시 결빙' },
-  ranged_single:{ cat: 'ranged', name: '원거리-단일',   icon: 'bolt',       range: 3.2, atk: 1.8, aspd: 2.2, targets: 1, splash: 0,
+  ranged_single:{ cat: 'ranged', name: '원거리-단일',   icon: 'bolt',       range: 2.6, atk: 1.8, aspd: 2.2, targets: 1, splash: 0,
     desc: '매우 긴 사거리에서 단일 대상을 저격, 확률로 번개가 맵 전역 무작위 적을 추가 타격', short: '저격 + 무작위 번개' },
-  buff_debuff:  { cat: 'buff',   name: '버프형-디버프', icon: 'debuff',     range: 1.6, atk: 0.5, aspd: 1.0, targets: 1, splash: 0, debuff: true,
+  buff_debuff:  { cat: 'buff',   name: '버프형-디버프', icon: 'debuff',     range: 1.3, atk: 0.5, aspd: 1.0, targets: 1, splash: 0, debuff: true,
     desc: '공격한 적에게 저주를 부여, 확률로 역병지대를 남겨 둔화+지속피해', short: '저주 + 역병지대' },
-  buff_support: { cat: 'buff',   name: '버프형-지원',   icon: 'buff',       range: 1.8, atk: 0.2, aspd: 0.6, targets: 1, splash: 0, support: true,
+  buff_support: { cat: 'buff',   name: '버프형-지원',   icon: 'buff',       range: 1.4, atk: 0.2, aspd: 0.6, targets: 1, splash: 0, support: true,
     desc: '아군에게 버프(오라) 부여, 스킬 발동 시 보조 터렛을 함께 소환', short: '아군 버프 + 보조터렛' },
 };
 
