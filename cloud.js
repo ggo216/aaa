@@ -95,6 +95,11 @@ async function loadCloudProgress() {
       const data = snap.data();
       applyingCloudData = true;
       mergeCloudData(data);
+      // one-time correction, same as the call in game.js's init() — safe to call again
+      // here since a merge can shift collection levels/lab progress after init() already
+      // ran it, but must NOT be called on every render (see reconcileLabPoints()'s own
+      // comment for why that specific mistake breaks lab-node purchases)
+      if (typeof reconcileLabPoints === 'function') reconcileLabPoints();
       updateDeckBonus();
       applyingCloudData = false;
       setCloudStatus(`${currentUser.displayName || currentUser.email} 님으로 동기화됨`);

@@ -32,22 +32,22 @@ const ENHANCE_MAX_LEVEL = 10;
 function enhanceRequirement(level) { return ENHANCE_BASE_COST + level * ENHANCE_COST_STEP; }
 
 // ---- Subtypes (4 categories -> 7 subtypes total) ----
-// range values were nerfed ~20% across the board (all subtypes, proportionally) —
-// units were covering too much of the field for too little investment
+// range values were nerfed ~20% across the board once already, then an additional 5%
+// on top of that (all subtypes, proportionally)
 const SUBTYPES = {
-  atk_single:   { cat: 'attack', name: '공격형-단일',   icon: 'slash',      range: 1.1, atk: 3.4, aspd: 1.0, targets: 1, splash: 0,
+  atk_single:   { cat: 'attack', name: '공격형-단일',   icon: 'slash',      range: 1.05, atk: 3.4, aspd: 1.0, targets: 1, splash: 0,
     desc: '가장 가까운 적 1명에게 강력한 단일 공격', short: '단일 강공격' },
-  atk_multi:    { cat: 'attack', name: '공격형-다중',   icon: 'multislash', range: 1.0, atk: 1.4, aspd: 1.0, targets: 4, splash: 0.9,
+  atk_multi:    { cat: 'attack', name: '공격형-다중',   icon: 'multislash', range: 0.95, atk: 1.4, aspd: 1.0, targets: 4, splash: 0.9,
     desc: '여러 적 동시 공격 + 스플래시, 확률로 더 큰 폭발 피해와 짧은 화면 흔들림', short: '다중 공격 + 대폭발 확률' },
-  magic_multi:  { cat: 'magic',  name: '마법형-다중',   icon: 'fire',       range: 1.8, atk: 1.1, aspd: 0.9, targets: 5, splash: 1.1,
+  magic_multi:  { cat: 'magic',  name: '마법형-다중',   icon: 'fire',       range: 1.71, atk: 1.1, aspd: 0.9, targets: 5, splash: 1.1,
     desc: '다수의 적에게 마법 공격 + 확률로 화상(지속피해)과 잔류 화염지대 생성', short: '화상 + 화염지대' },
-  magic_ctrl:   { cat: 'magic',  name: '마법형-제어',   icon: 'frost',      range: 1.7, atk: 0.6, aspd: 0.9, targets: 5, splash: 1.1, cc: true,
+  magic_ctrl:   { cat: 'magic',  name: '마법형-제어',   icon: 'frost',      range: 1.62, atk: 0.6, aspd: 0.9, targets: 5, splash: 1.1, cc: true,
     desc: '공격한 적을 둔화시킴, 서리 3중첩 시 강력한 결빙(1초)', short: '둔화, 3스택 시 결빙' },
-  ranged_single:{ cat: 'ranged', name: '원거리-단일',   icon: 'bolt',       range: 2.6, atk: 1.8, aspd: 2.2, targets: 1, splash: 0,
+  ranged_single:{ cat: 'ranged', name: '원거리-단일',   icon: 'bolt',       range: 2.47, atk: 1.8, aspd: 2.2, targets: 1, splash: 0,
     desc: '매우 긴 사거리에서 단일 대상을 저격, 확률로 번개가 맵 전역 무작위 적을 추가 타격', short: '저격 + 무작위 번개' },
-  buff_debuff:  { cat: 'buff',   name: '버프형-디버프', icon: 'debuff',     range: 1.3, atk: 0.5, aspd: 1.0, targets: 1, splash: 0, debuff: true,
+  buff_debuff:  { cat: 'buff',   name: '버프형-디버프', icon: 'debuff',     range: 1.24, atk: 0.5, aspd: 1.0, targets: 1, splash: 0, debuff: true,
     desc: '공격한 적에게 저주를 부여, 확률로 역병지대를 남겨 둔화+지속피해', short: '저주 + 역병지대' },
-  buff_support: { cat: 'buff',   name: '버프형-지원',   icon: 'buff',       range: 1.4, atk: 0.2, aspd: 0.6, targets: 1, splash: 0, support: true,
+  buff_support: { cat: 'buff',   name: '버프형-지원',   icon: 'buff',       range: 1.33, atk: 0.2, aspd: 0.6, targets: 1, splash: 0, support: true,
     desc: '아군에게 버프(오라) 부여, 스킬 발동 시 보조 터렛을 함께 소환', short: '아군 버프 + 보조터렛' },
 };
 
@@ -90,7 +90,7 @@ const LAB_TREES = {
     passiveNode('branchA', '일격필살', 'target', 'critChanceAdd', 1.3, 'root', 3),
     passiveNode('branchB', '쾌속 연격', 'fastfwd', 'aspdPct', 1.2, 'root', 3),
     passiveNode('leafA', '처형자의 원한', 'debuff', 'normalDmgPct', 2.0, 'branchA', 3),
-    passiveNode('leafB', '추가 타격', 'multislash', 'extraAtkChance', 0.6, 'branchB', 3),
+    passiveNode('leafB', '추가 타격', 'multislash', 'extraAtkChance', 0.57, 'branchB', 3),
     activeNode('capstone', '심판의 일격', 'bolt', 'leafB', 3, 'single', 0.6),
   ],
   atk_multi: [
@@ -98,14 +98,14 @@ const LAB_TREES = {
     passiveNode('branchA', '치명 연쇄', 'target', 'critChanceAdd', 1.3, 'root', 3),
     passiveNode('branchB', '쾌속 난타', 'fastfwd', 'aspdPct', 1.2, 'root', 3),
     passiveNode('leafA', '여파', 'sparkle', 'splashPct', 2.2, 'branchA', 3),
-    passiveNode('leafB', '유혈', 'debuff', 'dotChance', 1.0, 'branchB', 3),
+    passiveNode('leafB', '유혈', 'debuff', 'dotChance', 0.95, 'branchB', 3),
     activeNode('capstone', '대지 붕괴', 'bolt', 'leafB', 3, 'aoe', 0.35),
   ],
   magic_multi: [
     passiveNode('root', '마력 증폭', 'arcane', 'atkPct', 1.4, null),
     passiveNode('branchA', '치명 마력', 'target', 'critChanceAdd', 1.3, 'root', 3),
     passiveNode('branchB', '시전 가속', 'fastfwd', 'aspdPct', 1.2, 'root', 3),
-    passiveNode('leafA', '화염 낙인', 'debuff', 'dotChance', 1.0, 'branchA', 3),
+    passiveNode('leafA', '화염 낙인', 'debuff', 'dotChance', 0.95, 'branchA', 3),
     passiveNode('leafB', '연쇄 폭발', 'sparkle', 'splashPct', 2.2, 'branchB', 3),
     activeNode('capstone', '메테오 소환', 'bolt', 'leafB', 3, 'aoe', 0.45),
   ],
@@ -114,7 +114,7 @@ const LAB_TREES = {
     passiveNode('branchA', '혹한 강화', 'frost', 'slowAdd', 1.3, 'root', 3),
     passiveNode('branchB', '시전 가속', 'fastfwd', 'aspdPct', 1.2, 'root', 3),
     passiveNode('leafA', '서리 폭발', 'sparkle', 'splashPct', 2.0, 'branchA', 3),
-    passiveNode('leafB', '동상', 'debuff', 'dotChance', 0.9, 'branchB', 3),
+    passiveNode('leafB', '동상', 'debuff', 'dotChance', 0.86, 'branchB', 3),
     activeNode('capstone', '절대영도 강림', 'bolt', 'leafB', 3, 'freeze', 0.3),
   ],
   ranged_single: [
@@ -122,14 +122,14 @@ const LAB_TREES = {
     passiveNode('branchA', '치명 사격', 'target', 'critChanceAdd', 1.3, 'root', 3),
     passiveNode('branchB', '속사', 'fastfwd', 'aspdPct', 1.2, 'root', 3),
     passiveNode('leafA', '보스 헌터', 'target', 'bossDmgPct', 2.0, 'branchA', 3),
-    passiveNode('leafB', '이중 사격', 'arrow', 'extraAtkChance', 0.6, 'branchB', 3),
+    passiveNode('leafB', '이중 사격', 'arrow', 'extraAtkChance', 0.57, 'branchB', 3),
     activeNode('capstone', '궁극 저격', 'bolt', 'leafB', 3, 'single', 0.7),
   ],
   buff_debuff: [
     passiveNode('root', '저주술 연마', 'debuff', 'atkPct', 1.4, null),
     passiveNode('branchA', '약화 강화', 'debuff', 'debuffPct', 1.3, 'root', 3),
     passiveNode('branchB', '저주 범위 확장', 'sparkle', 'rangePct', 1.2, 'root', 3),
-    passiveNode('leafA', '역병', 'debuff', 'dotChance', 1.1, 'branchA', 3),
+    passiveNode('leafA', '역병', 'debuff', 'dotChance', 1.05, 'branchA', 3),
     passiveNode('leafB', '파멸의 표식', 'target', 'bossDmgPct', 2.0, 'branchB', 3),
     activeNode('capstone', '대재앙', 'bolt', 'leafB', 3, 'curse', 0.3),
   ],

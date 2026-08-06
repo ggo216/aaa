@@ -942,9 +942,13 @@ function findTargetsFromPool(pool, count) {
 // canvas) + fillText + restore, and at heavy-combat volume the array was sitting at or
 // near its cap essentially every frame. Lowered from 90 to 55: still plenty of visible
 // damage feedback, but a meaningfully smaller fixed per-frame draw cost.
-const MAX_FLOATING_TEXTS = 55;
-const MAX_PARTICLES = 240;
-const MAX_PROJECTILES = 150;
+// lowered further (55->40, 240->190, 150->110): combined with dealDamage()'s new
+// showText=false suppression on incidental damage (splash/DoT/zone/turret ticks —
+// the highest-VOLUME sources), the caps themselves were rarely the limiting factor
+// anymore, but a smaller worst-case still means a smaller worst-case draw cost
+const MAX_FLOATING_TEXTS = 40;
+const MAX_PARTICLES = 190;
+const MAX_PROJECTILES = 110;
 const MAX_ZONES = 14;
 const MAX_TURRETS = 8;
 
@@ -967,7 +971,7 @@ function tickZones(dt) {
       for (const m of state.monsters) {
         if (m.dying) continue;
         if (dist(z.x, z.y, m.x, m.y) <= z.r) {
-          dealDamage(m, z.dmgPerTick, false);
+          dealDamage(m, z.dmgPerTick, false, false);
           if (z.kind === 'plague') applySlow(m, 0.6, performance.now() + 700);
         }
       }
@@ -1022,7 +1026,7 @@ function tickTurrets(dt) {
         if (d <= t.range && d < bestD) { bestD = d; target = m; }
       }
       if (target) {
-        dealDamage(target, t.dmgPerTick, false);
+        dealDamage(target, t.dmgPerTick, false, false);
         spawnHitParticles(target.x, target.y, '#379966', 4);
         t.fireFlash = performance.now(); // recoil scale-punch cue drawn in draw()
         if (state.projectiles.length < MAX_PROJECTILES) {
@@ -1068,9 +1072,13 @@ function applyAllyBuff(atkPct, aspdPct, untilTs) {
   }
 }
 
-function dealDamage(m, amount, isCrit) {
+// showText defaults to true for primary attacks. Secondary/incidental damage sources
+// (splash, DoT ticks, zone ticks, turret ticks) pass false — those can land many times
+// per second across many monsters at once and were the biggest contributor to floating-
+// text volume without adding much readable information over the primary hit's own number
+function dealDamage(m, amount, isCrit, showText = true) {
   m.hp -= amount;
-  if (state.floatingTexts.length < MAX_FLOATING_TEXTS) {
+  if (showText && state.floatingTexts.length < MAX_FLOATING_TEXTS) {
     state.floatingTexts.push({
       x: m.x + (Math.random() * 14 - 7), y: m.y - 18, t: 0, dur: isCrit ? 0.9 : 0.6,
       value: Math.round(amount), crit: isCrit,
@@ -1102,7 +1110,7 @@ function resolveHit(m, inst, stats, center) {
     for (const other of state.monsters) {
       if (other === m || other.dying) continue;
       if (dist(m.x, m.y, other.x, other.y) <= 55) {
-        dealDamage(other, dmg * stats.splashPct / 100, false);
+        dealDamage(other, dmg * stats.splashPct / 100, false, false);
         spawnHitParticles(other.x, other.y, '#c17a41', 3);
       }
     }
@@ -1134,7 +1142,7 @@ function resolveHit(m, inst, stats, center) {
       for (const other of state.monsters) {
         if (other === m || other.dying) continue;
         if (dist(m.x, m.y, other.x, other.y) <= bigR) {
-          dealDamage(other, stats.atk * (stats.splashPct / 100) * 1.3, false);
+          dealDamage(other, stats.atk * (stats.splashPct / 100) * 1.3, false, false);
         }
       }
       spawnHitParticles(m.x, m.y, '#c17a41', 16);
@@ -1220,7 +1228,7 @@ function tickDots(dt) {
     if (m.dying || !m.dots || m.dots.length === 0) continue;
     m.dots = m.dots.filter(d => {
       if (now >= d.nextTick) {
-        dealDamage(m, d.dmgPerTick, false);
+        dealDamage(m, d.dmgPerTick, false, false);
         d.nextTick += 900;
         d.ticksLeft--;
       }
@@ -1558,9 +1566,11 @@ function loop(now) {
     if (snapshotAccum >= 3) { snapshotAccum = 0; saveRunSnapshot(); }
 
     // keep the 유닛 강화 buttons' disabled state honest as gold changes passively
-    // mid-wave, without rebuilding that DOM every single frame
+    // mid-wave — updateUpgradeListState() only touches attributes on already-existing
+    // button nodes (see its own comment for why NOT calling renderUpgradeList() here
+    // matters), so this is safe to run this often
     upgradeListAccum += rawDt;
-    if (upgradeListAccum >= 0.25) { upgradeListAccum = 0; renderUpgradeList(); }
+    if (upgradeListAccum >= 0.25) { upgradeListAccum = 0; updateUpgradeListState(); }
   }
 
   requestAnimationFrame(loop);
@@ -2123,21 +2133,32 @@ function updateHud() {
   if (summonBtn) {
     summonBtn.disabled = state.gold < 10 || state.activeDeck.length === 0
       || state.phase === 'idle' || state.phase === 'gameover' || state.bench.length >= BENCH_MAX;
-    summonBtn.title = state.activeDeck.length === 0 ? '카드함에서 덱을 먼저 구성하세요'
-      : state.bench.length >= BENCH_MAX ? '대기 유닛이 가득 찼습니다'
-      : state.gold < 10 ? '골드가 부족합니다'
+    // the "why disabled" reason used to live ONLY in the title attribute — which never
+    // appears on iOS Safari (no hover state on a touchscreen, and a disabled button
+    // doesn't even receive the tap in the first place to reveal it any other way), so
+    // on the platform this game is actually played on, that explanation was invisible
+    // the whole time. The button's own visible label is now the explanation instead.
+    const reason = state.activeDeck.length === 0 ? '덱을 먼저 구성하세요'
+      : state.phase === 'idle' ? '게임 시작 후 소환'
+      : state.phase === 'gameover' ? '게임 종료됨'
+      : state.bench.length >= BENCH_MAX ? '대기 유닛 가득참'
+      : state.gold < 10 ? '골드 부족 (10 필요)'
       : '';
+    summonBtn.textContent = reason || '소환 (10 골드)';
+    summonBtn.title = reason;
   }
 }
 
 const TIERS_BY_ID = {};
 for (const t of TIERS) TIERS_BY_ID[t.id] = t;
 
-// rebuilds the in-run "유닛 강화" list. Called on every interaction-driven render()
-// (immediate/unthrottled — infrequent) AND, separately, on a throttle from the main
-// loop (so a button disabled for lack of gold still flips to enabled within ~250ms
-// of gold passively crossing the cost threshold mid-wave, without rebuilding this
-// DOM from scratch 60 times a second, which was a real perf regression)
+// rebuilds the in-run "유닛 강화" list's STRUCTURE — only called on interaction-driven
+// render() (deck contents changing), never on the per-frame throttle. Tearing down and
+// recreating every row+button on a timer (this used to also run from a 0.25s loop
+// throttle) made the buttons visibly flicker and could drop a click that landed in the
+// same instant a row got replaced out from under the pointer — a real reported bug.
+// The throttle now calls updateUpgradeListState() instead, which only touches
+// disabled/text/title on the EXISTING nodes, never replacing them.
 function renderUpgradeList() {
   if (state.screen !== 'game') return;
   const gdl = document.getElementById('gameDeckList');
@@ -2146,15 +2167,13 @@ function renderUpgradeList() {
   state.activeDeck.forEach(defId => {
     const def = UNIT_DEFS_BY_ID[defId];
     const tier = TIERS_BY_ID[def.tierId];
-    const rl = state.runUpgrades[defId] || 0;
-    const cost = runUpgradeCost(rl);
-    const maxed = rl >= RUN_UPGRADE_MAX_LEVEL;
     const row = document.createElement('div');
     row.className = 'upgradeRow';
+    row.dataset.defid = defId;
     row.innerHTML = `
       <span class="upgradeIcon" style="color:${tier.color}">${svgIcon(def.icon, 18)}</span>
-      <div class="upgradeName">${def.name}${rl > 0 ? ` <span class="lvlTag">+${rl}</span>` : ''}</div>
-      <button class="upgradeBtn" ${maxed || state.gold < cost || state.phase === 'gameover' ? 'disabled' : ''} title="${maxed ? '이번 판 최대 강화입니다' : state.gold < cost ? '골드가 부족합니다' : ''}">${maxed ? 'MAX' : `+${cost}G`}</button>
+      <div class="upgradeName">${def.name}<span class="lvlTag"></span></div>
+      <button class="upgradeBtn"></button>
     `;
     row.querySelector('.upgradeBtn').onclick = () => upgradeRunType(defId);
     gdl.appendChild(row);
@@ -2162,6 +2181,29 @@ function renderUpgradeList() {
   if (state.activeDeck.length === 0) {
     gdl.innerHTML = '<div class="hint">덱이 비어 있습니다. 카드함에서 덱을 구성하세요.</div>';
   }
+  updateUpgradeListState();
+}
+
+// cheap per-row refresh: only mutates disabled/textContent/title on nodes that already
+// exist (built by renderUpgradeList above) — safe to call every frame or on a throttle
+// without any flicker or risk of eating an in-progress click
+function updateUpgradeListState() {
+  if (state.screen !== 'game') return;
+  const gdl = document.getElementById('gameDeckList');
+  if (!gdl) return;
+  gdl.querySelectorAll('.upgradeRow').forEach(row => {
+    const defId = row.dataset.defid;
+    const rl = state.runUpgrades[defId] || 0;
+    const cost = runUpgradeCost(rl);
+    const maxed = rl >= RUN_UPGRADE_MAX_LEVEL;
+    const lvlTag = row.querySelector('.lvlTag');
+    if (lvlTag) lvlTag.textContent = rl > 0 ? ` +${rl}` : '';
+    const btn = row.querySelector('.upgradeBtn');
+    if (!btn) return;
+    btn.disabled = maxed || state.gold < cost || state.phase === 'gameover';
+    btn.title = maxed ? '이번 판 최대 강화입니다' : state.gold < cost ? '골드가 부족합니다' : '';
+    btn.textContent = maxed ? 'MAX' : `+${cost}G`;
+  });
 }
 
 function renderGame() {
@@ -2246,6 +2288,9 @@ function renderCollectionScreen() {
       return entry.level < ENHANCE_MAX_LEVEL && entry.count >= enhanceRequirement(entry.level);
     });
     bulkEnhanceBtn.disabled = !anyEnhanceable;
+    // visible label, not title — see the summonBtn comment in updateHud() for why
+    // title-only explanations don't work on the platform this is actually played on
+    bulkEnhanceBtn.textContent = anyEnhanceable ? '일괄 강화' : '강화 가능한 카드 없음';
     bulkEnhanceBtn.title = anyEnhanceable ? '' : '강화 가능한 카드가 없습니다';
   }
 
@@ -2361,9 +2406,19 @@ const LAB_ACTIVE_KIND_LABEL = { single: '단일 강타', aoe: '광역 폭발', f
 // with 0 tokens/mastery showing — after this session's heavy iteration (many local
 // saves, a cloud merge-logic change, etc), some historical inconsistency between
 // "cards leveled up" and "points actually recorded" was possible even though the
-// current enhance/spend code is correct going forward. Cheap and idempotent, so it's
-// safe to just re-run on every lab screen visit rather than track down and be certain
-// about one specific historical cause.
+// current enhance/spend code is correct going forward.
+//
+// IMPORTANT: this is a ONE-TIME correction applied right after loading saved data
+// (init(), and once after a cloud merge), NOT something to call on every render. It
+// was originally wired into renderLabScreen() and that was itself a bug: "earned" and
+// "spent" here are recomputed from current TOTALS every call, an approximation of
+// history rather than a real transaction ledger, and reordering/interleaving of past
+// earns vs spends can make that approximation land slightly higher than the real
+// per-purchase split actually was. Since the function only ever raises a balance,
+// calling it after every purchase (render() runs after upgradeLabNode()) meant any
+// such mismatch silently topped the balance back up right after spending it down —
+// i.e. free/infinite lab upgrades. Running it once at load, before any purchases
+// happen in this session, gets the historical-correction benefit without that loop.
 function reconcileLabPoints() {
   let totalMasteryEarned = 0;
   const earnedPerSub = {};
@@ -2390,7 +2445,6 @@ function reconcileLabPoints() {
 }
 
 function renderLabScreen() {
-  reconcileLabPoints();
   const subKey = state.labSelectedSub;
   const tokens = state.labTokens[subKey] || 0;
   const subInfo = SUBTYPES[subKey];
@@ -2550,6 +2604,7 @@ function init() {
       state.activeDeck.push(defId);
     }
   }
+  reconcileLabPoints();
   updateDeckBonus();
   applyStaticIcons();
   // tryRestoreRunSnapshot() MUST run before this initial render(): render() always
