@@ -35,7 +35,7 @@ html, body {
 
 /* ---------------- screens ---------------- */
 .screen { animation: screenIn 0.22s ease; }
-#homeScreen.hidden, #gameScreen.hidden, #collectionScreen.hidden { display: none !important; }
+#homeScreen.hidden, #gameScreen.hidden, #collectionScreen.hidden, #labScreen.hidden { display: none !important; }
 @keyframes screenIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 
 #homeScreen { min-height: 88vh; display: flex; align-items: center; justify-content: center; }

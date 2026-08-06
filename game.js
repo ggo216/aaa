@@ -553,21 +553,13 @@ function endWave() {
   if (state.wave % 10 === 0 && state.bossAliveThisWave) {
     return gameOver('보스를 제한시간 내에 처치하지 못했습니다');
   }
-  // gold is only awarded every 5 waves now (accumulated across the skipped waves),
-  // not on every single wave clear — card coin still drops every wave
-  const goldMilestone = state.wave % 5 === 0;
+  // no gold on wave-clear anymore — gold instead comes from killing monsters
+  // during the wave (see onMonsterKilled), with bonus gold on mid/boss kills.
+  // card coin still drops on wave clear as before.
   const coinGain = 5 + state.wave * 2;
   state.cardCoin += coinGain;
-  if (goldMilestone) {
-    let goldGain = 0;
-    for (let w = state.wave - 4; w <= state.wave; w++) goldGain += 15 + w * 5;
-    state.gold += goldGain;
-    log(`웨이브 ${state.wave} 종료! +${goldGain} 골드, +${coinGain} 카드코인`);
-    showWaveToast(`WAVE ${state.wave} CLEAR   +${goldGain} 골드`);
-  } else {
-    log(`웨이브 ${state.wave} 종료! +${coinGain} 카드코인`);
-    showWaveToast(`WAVE ${state.wave} CLEAR`);
-  }
+  log(`웨이브 ${state.wave} 종료! +${coinGain} 카드코인`);
+  showWaveToast(`WAVE ${state.wave} CLEAR`);
   flashField('flashGold');
   // only the very first wave has a 3s prep countdown; afterwards waves chain immediately
   beginWave();
@@ -1391,11 +1383,16 @@ function tickCombat(dt) {
 function onMonsterKilled(m) {
   const burstColor = m.kind === 'boss' ? '#c1465f' : m.kind === 'mid' ? '#c17a41' : '#b8657a';
   spawnHitParticles(m.x, m.y, burstColor, m.kind === 'boss' ? 22 : m.kind === 'mid' ? 14 : 7);
+  // gold now comes from killing monsters (not from clearing the wave) — every kill
+  // gives a small wave-scaled base amount, with a much larger bonus on mid/boss kills
+  state.gold += 1 + Math.floor(state.wave / 4);
   if (m.kind === 'mid') {
+    state.gold += 8 + state.wave * 2;
     if (Math.random() < 0.35) { state.gems += 1; log('중간보스 처치! 특수재화 +1'); pulseStat(HUD.collGemStat); }
     shakeScreen(4);
   } else if (m.kind === 'boss') {
     state.bossAliveThisWave = false; // boss defeated in time -> wave can now clear normally
+    state.gold += 25 + state.wave * 4;
     const g = 2 + Math.floor(Math.random() * 3);
     state.gems += g;
     log(`보스 처치! 특수재화 +${g}`);
@@ -1892,14 +1889,19 @@ function draw() {
       ctx.stroke();
       ctx.restore();
     } else {
+      // flat fill + globalAlpha, not a per-particle radial gradient: with up to
+      // MAX_PARTICLES(240) of these possibly alive at once every single frame,
+      // ctx.createRadialGradient()+addColorStop() per particle turned out to be a
+      // real input-lag source during heavy combat (each one allocates a gradient
+      // object and does extra rasterization work) — this reads almost identically
+      // at this particle size but is dramatically cheaper
       const r = pt.r * life;
-      const grad = ctx.createRadialGradient(pt.x, pt.y, 0, pt.x, pt.y, Math.max(0.6, r));
-      grad.addColorStop(0, hexToRgba(pt.color, alpha));
-      grad.addColorStop(1, hexToRgba(pt.color, 0));
       ctx.beginPath();
       ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = grad;
+      ctx.fillStyle = pt.color;
+      ctx.globalAlpha = alpha;
       ctx.fill();
+      ctx.globalAlpha = 1;
     }
   }
   ctx.globalAlpha = 1;
@@ -2319,19 +2321,18 @@ document.addEventListener('contextmenu', (e) => e.preventDefault());
 document.addEventListener('dragstart', (e) => e.preventDefault());
 document.addEventListener('selectstart', (e) => { if (!e.target.closest('input, textarea')) e.preventDefault(); });
 
-// iOS Safari (especially as a bookmarked/home-screen app) double-tap-to-zoom and
-// pinch-to-zoom gestures otherwise blow up the layout and leave text selectable
-// underneath; touch-action:manipulation (CSS) covers most of this, but Safari's
-// own non-standard gesture events need to be blocked directly too
+// iOS Safari (especially as a bookmarked/home-screen app) pinch-to-zoom gestures
+// otherwise blow up the layout; touch-action:manipulation (CSS, already applied to
+// * and html/body) natively disables double-tap-to-zoom in modern mobile browsers,
+// so only Safari's own non-standard pinch gesture events need blocking directly here.
+// (A manual touchend-based "was that a double-tap" heuristic used to live here too,
+// but it compared timestamps globally rather than per-element, so two quick taps on
+// the SAME button — e.g. tapping 소환 repeatedly — got misread as a double-tap-zoom
+// attempt and had their second click swallowed. touch-action already handles the
+// real double-tap-zoom case, so the heuristic was redundant AND actively buggy.)
 document.addEventListener('gesturestart', (e) => e.preventDefault());
 document.addEventListener('gesturechange', (e) => e.preventDefault());
 document.addEventListener('gestureend', (e) => e.preventDefault());
-let lastTouchEnd = 0;
-document.addEventListener('touchend', (e) => {
-  const now = Date.now();
-  if (now - lastTouchEnd <= 350) e.preventDefault();
-  lastTouchEnd = now;
-}, { passive: false });
 
 canvas.addEventListener('click', (e) => {
   if (state.phase === 'idle' || state.phase === 'gameover') return;
