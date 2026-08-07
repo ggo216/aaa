@@ -31,36 +31,46 @@ const ENHANCE_STAT_BONUS = { atk: 0.07, range: 0.045, aspd: 0.05 }; // +% per le
 const ENHANCE_MAX_LEVEL = 10;
 function enhanceRequirement(level) { return ENHANCE_BASE_COST + level * ENHANCE_COST_STEP; }
 
-// ---- Subtypes (4 categories -> 7 subtypes total) ----
+// ---- Subtypes (4 categories -> 7 subtypes total, now 9 with healer/tanker) ----
 // range values were nerfed ~20% across the board once already, then an additional 5%
 // on top of that (all subtypes, proportionally)
+// hpMult: multiplier on the shared unit-HP base formula (see computeStats' maxHp calc
+// in game.js) — tanker is built to soak hits, ranged/support are glass, others baseline
 const SUBTYPES = {
-  atk_single:   { cat: 'attack', name: '공격형-단일',   icon: 'slash',      range: 1.05, atk: 3.4, aspd: 1.0, targets: 1, splash: 0,
-    desc: '가장 가까운 적 1명에게 강력한 단일 공격', short: '단일 강공격' },
-  atk_multi:    { cat: 'attack', name: '공격형-다중',   icon: 'multislash', range: 0.95, atk: 1.4, aspd: 1.0, targets: 4, splash: 0.9,
+  atk_single:   { cat: 'attack', name: '공격형-단일',   icon: 'slash',      range: 1.05, atk: 3.4, aspd: 1.0, targets: 1, splash: 0, hpMult: 1.1,
+    desc: '가장 가까운 적 1명에게 강력한 단일 공격, 확률로 폭탄을 부착해 지연 폭발시킴', short: '단일 강공격 + 폭탄 부착' },
+  atk_multi:    { cat: 'attack', name: '공격형-다중',   icon: 'multislash', range: 0.95, atk: 1.4, aspd: 1.0, targets: 4, splash: 0.9, hpMult: 1.0,
     desc: '여러 적 동시 공격 + 스플래시, 확률로 더 큰 폭발 피해와 짧은 화면 흔들림', short: '다중 공격 + 대폭발 확률' },
-  magic_multi:  { cat: 'magic',  name: '마법형-다중',   icon: 'fire',       range: 1.71, atk: 1.1, aspd: 0.9, targets: 5, splash: 1.1,
+  magic_multi:  { cat: 'magic',  name: '마법형-다중',   icon: 'fire',       range: 1.71, atk: 1.1, aspd: 0.9, targets: 5, splash: 1.1, hpMult: 0.9,
     desc: '다수의 적에게 마법 공격 + 확률로 화상(지속피해)과 잔류 화염지대 생성', short: '화상 + 화염지대' },
-  magic_ctrl:   { cat: 'magic',  name: '마법형-제어',   icon: 'frost',      range: 1.62, atk: 0.6, aspd: 0.9, targets: 5, splash: 1.1, cc: true,
+  magic_ctrl:   { cat: 'magic',  name: '마법형-제어',   icon: 'frost',      range: 1.62, atk: 0.6, aspd: 0.9, targets: 5, splash: 1.1, cc: true, hpMult: 0.9,
     desc: '공격한 적을 둔화시킴, 서리 3중첩 시 강력한 결빙(1초)', short: '둔화, 3스택 시 결빙' },
-  ranged_single:{ cat: 'ranged', name: '원거리-단일',   icon: 'bolt',       range: 2.47, atk: 1.8, aspd: 2.2, targets: 1, splash: 0,
+  ranged_single:{ cat: 'ranged', name: '원거리-단일',   icon: 'bolt',       range: 2.47, atk: 1.8, aspd: 2.2, targets: 1, splash: 0, hpMult: 0.75,
     desc: '매우 긴 사거리에서 단일 대상을 저격, 확률로 번개가 맵 전역 무작위 적을 추가 타격', short: '저격 + 무작위 번개' },
-  buff_debuff:  { cat: 'buff',   name: '버프형-디버프', icon: 'debuff',     range: 1.24, atk: 0.5, aspd: 1.0, targets: 1, splash: 0, debuff: true,
+  buff_debuff:  { cat: 'buff',   name: '버프형-디버프', icon: 'debuff',     range: 1.24, atk: 0.5, aspd: 1.0, targets: 1, splash: 0, debuff: true, hpMult: 0.85,
     desc: '공격한 적에게 저주를 부여, 확률로 역병지대를 남겨 둔화+지속피해', short: '저주 + 역병지대' },
-  buff_support: { cat: 'buff',   name: '버프형-지원',   icon: 'buff',       range: 1.33, atk: 0.2, aspd: 0.6, targets: 1, splash: 0, support: true,
-    desc: '아군에게 버프(오라) 부여, 스킬 발동 시 보조 터렛을 함께 소환', short: '아군 버프 + 보조터렛' },
+  buff_support: { cat: 'buff',   name: '버프형-지원',   icon: 'buff',       range: 1.33, atk: 0.2, aspd: 0.6, targets: 1, splash: 0, support: true, hpMult: 0.8,
+    desc: '아군에게 버프(오라) 부여, 스킬 발동 시 캐스터 주변 지역에 강화 버프 지대를 전개 + 보조 터렛 소환', short: '지역 버프 + 보조터렛' },
+  heal_support: { cat: 'support', name: '지원형-힐러',  icon: 'heart',      range: 1.35, atk: 0.35, aspd: 0.55, targets: 1, splash: 0, hpMult: 1.2,
+    desc: '주기적으로 사거리 내 피해를 입은 아군을 치유, 스킬 발동 시 대량 치유', short: '아군 지속 치유' },
+  tank_guard:   { cat: 'guard',  name: '수호형-탱커',   icon: 'shield',     range: 0.55, atk: 0.3, aspd: 0.7, targets: 1, splash: 0, guard: true, hpMult: 2.6,
+    desc: '근처 아군의 피해를 경감시키는 보호막 오라를 상시 전개, 매우 튼튼함', short: '피해 경감 오라 + 높은 체력' },
 };
 
 // ---- Legendary+ active skills (레전더리/미스틱 등급 카드 전용, 일정 주기마다 자동 발동) ----
 const SKILL_INTERVAL = 10; // seconds between activations
 const LEGENDARY_SKILLS = {
   atk_single:   { name: '필살 일격', desc: '가장 가까운 적에게 강력한 추가 피해', dmgMult: 3.0 },
-  atk_multi:    { name: '회전베기', desc: '사거리 내 모든 적에게 광역 피해', dmgMult: 1.4 },
+  // 광란(frenzy): 순간 피해 대신 자신의 공격속도를 짧게 폭증시키는 자가 버프로 변경
+  atk_multi:    { name: '광란', desc: '짧은 시간 자신의 공격속도가 폭발적으로 증가 (+200%)', frenzy: true },
   magic_multi:  { name: '메테오 폭격', desc: '사거리 내 다수의 적에게 폭발 피해', dmgMult: 1.8 },
   magic_ctrl:   { name: '절대영도', desc: '사거리 내 모든 적을 강하게 둔화', dmgMult: 0.6, freeze: true },
   ranged_single:{ name: '관통사격', desc: '일직선상의 적 3명을 관통 저격', dmgMult: 2.2 },
-  buff_debuff:  { name: '저주 각인', desc: '사거리 내 모든 적에게 강력한 저주 부여', dmgMult: 0.5, curse: true },
-  buff_support: { name: '전군 강화', desc: '모든 아군에게 짧은 시간 강력한 버프 부여', ally: true },
+  // 연쇄 저주 폭발(multi-burst): 짧은 시간 동안 여러 번의 보너스 공격을 몰아친다
+  buff_debuff:  { name: '연쇄 저주 폭발', desc: '사거리 내 적에게 저주를 실은 보너스 공격을 5연속 가함', burst: true },
+  buff_support: { name: '축복의 지대', desc: '캐스터 주변 지역에 강력한 버프 지대를 전개', ally: true },
+  heal_support: { name: '기적의 치유', desc: '사거리 내 모든 아군을 대량으로 치유', healMult: 3.0 },
+  tank_guard:   { name: '불굴의 방벽', desc: '사거리 내 아군에게 강력한 피해감소 보호막 부여', ally: true, shield: true },
 };
 
 // ---- 연구실 (Research Lab): per-subtype skill trees, shared by every owned card of
@@ -85,29 +95,35 @@ function activeNode(id, name, icon, requiresId, requiresLevel, kind, dmgMultPerL
 }
 
 const LAB_TREES = {
+  // capstone activeKind 'bomb': 폭탄 부착(지연 후 광역 폭발) — 즉시 단일 강타 대신
+  // 대상에게 폭탄을 부착해 짧은 지연 뒤 주변에 폭발 피해를 입히는 별도 메커니즘
   atk_single: [
     passiveNode('root', '예리한 칼날', 'slash', 'atkPct', 1.4, null),
     passiveNode('branchA', '일격필살', 'target', 'critChanceAdd', 1.3, 'root', 3),
     passiveNode('branchB', '쾌속 연격', 'fastfwd', 'aspdPct', 1.2, 'root', 3),
     passiveNode('leafA', '처형자의 원한', 'debuff', 'normalDmgPct', 2.0, 'branchA', 3),
     passiveNode('leafB', '추가 타격', 'multislash', 'extraAtkChance', 0.57, 'branchB', 3),
-    activeNode('capstone', '심판의 일격', 'bolt', 'leafB', 3, 'single', 0.6),
+    activeNode('capstone', '폭탄 부착', 'bolt', 'leafB', 3, 'bomb', 0.6),
   ],
+  // capstone activeKind 'tornado': 정적인 광역 폭발 대신 경로를 따라 이동하며 지속피해를
+  // 주는 회오리를 소환 — 기존 다른 지대 효과(화염/역병)와 달리 스스로 이동한다는 점이 핵심
   atk_multi: [
     passiveNode('root', '광역 숙련', 'multislash', 'atkPct', 1.4, null),
     passiveNode('branchA', '치명 연쇄', 'target', 'critChanceAdd', 1.3, 'root', 3),
     passiveNode('branchB', '쾌속 난타', 'fastfwd', 'aspdPct', 1.2, 'root', 3),
     passiveNode('leafA', '여파', 'sparkle', 'splashPct', 2.2, 'branchA', 3),
     passiveNode('leafB', '유혈', 'debuff', 'dotChance', 0.95, 'branchB', 3),
-    activeNode('capstone', '대지 붕괴', 'bolt', 'leafB', 3, 'aoe', 0.35),
+    activeNode('capstone', '회오리 소환', 'bolt', 'leafB', 3, 'tornado', 0.35),
   ],
+  // capstone activeKind 'meteor': 즉시 광역 피해 대신 착탄 지점을 미리 표시(텔레그래프)한 뒤
+  // 지연시간 후 떨어지는 진짜 "메테오" — 이름값에 맞는 실제 메커니즘으로 교체
   magic_multi: [
     passiveNode('root', '마력 증폭', 'arcane', 'atkPct', 1.4, null),
     passiveNode('branchA', '치명 마력', 'target', 'critChanceAdd', 1.3, 'root', 3),
     passiveNode('branchB', '시전 가속', 'fastfwd', 'aspdPct', 1.2, 'root', 3),
     passiveNode('leafA', '화염 낙인', 'debuff', 'dotChance', 0.95, 'branchA', 3),
     passiveNode('leafB', '연쇄 폭발', 'sparkle', 'splashPct', 2.2, 'branchB', 3),
-    activeNode('capstone', '메테오 소환', 'bolt', 'leafB', 3, 'aoe', 0.45),
+    activeNode('capstone', '메테오 소환', 'bolt', 'leafB', 3, 'meteor', 0.45),
   ],
   magic_ctrl: [
     passiveNode('root', '냉기 마력', 'frost', 'atkPct', 1.4, null),
@@ -117,13 +133,15 @@ const LAB_TREES = {
     passiveNode('leafB', '동상', 'debuff', 'dotChance', 0.86, 'branchB', 3),
     activeNode('capstone', '절대영도 강림', 'bolt', 'leafB', 3, 'freeze', 0.3),
   ],
+  // capstone activeKind 'laser': 단일 대상 강타 대신 관통형 레이저 빔 — 조준선 상의 모든
+  // 적을 한 번에 관통 타격하는, 두꺼운 빔으로 표현되는 별도 시각/메커니즘
   ranged_single: [
     passiveNode('root', '정밀 조준', 'arrow', 'atkPct', 1.4, null),
     passiveNode('branchA', '치명 사격', 'target', 'critChanceAdd', 1.3, 'root', 3),
     passiveNode('branchB', '속사', 'fastfwd', 'aspdPct', 1.2, 'root', 3),
     passiveNode('leafA', '보스 헌터', 'target', 'bossDmgPct', 2.0, 'branchA', 3),
     passiveNode('leafB', '이중 사격', 'arrow', 'extraAtkChance', 0.57, 'branchB', 3),
-    activeNode('capstone', '궁극 저격', 'bolt', 'leafB', 3, 'single', 0.7),
+    activeNode('capstone', '관통 레이저', 'bolt', 'leafB', 3, 'laser', 0.7),
   ],
   buff_debuff: [
     passiveNode('root', '저주술 연마', 'debuff', 'atkPct', 1.4, null),
@@ -139,7 +157,24 @@ const LAB_TREES = {
     passiveNode('branchB', '가속 오라', 'fastfwd', 'aspdPct', 1.2, 'root', 3),
     passiveNode('leafA', '파괴 축복', 'target', 'auraCritDmg', 2.0, 'branchA', 3),
     passiveNode('leafB', '용맹의 축복', 'target', 'auraBossDmg', 1.5, 'branchB', 3),
+    // capstone activeKind 'ally': 이제 전군이 아니라 캐스터 주변 지역(버프 지대)에만 적용됨 — 오라클 리워크
     activeNode('capstone', '천군만마', 'bolt', 'leafB', 3, 'ally', 0),
+  ],
+  heal_support: [
+    passiveNode('root', '생명의 손길', 'heart', 'atkPct', 1.4, null),
+    passiveNode('branchA', '치유 가속', 'fastfwd', 'aspdPct', 1.2, 'root', 3),
+    passiveNode('branchB', '치유 범위 확장', 'sparkle', 'rangePct', 1.2, 'root', 3),
+    passiveNode('leafA', '응급 처치', 'heart', 'healPct', 2.2, 'branchA', 3),
+    passiveNode('leafB', '보호의 기운', 'shield', 'shieldPct', 1.0, 'branchB', 3),
+    activeNode('capstone', '대치유', 'bolt', 'leafB', 3, 'heal', 0.5),
+  ],
+  tank_guard: [
+    passiveNode('root', '철벽 방어', 'shield', 'atkPct', 1.4, null),
+    passiveNode('branchA', '생명력 강화', 'heart', 'guardHpPct', 2.0, 'root', 3),
+    passiveNode('branchB', '기민한 반응', 'fastfwd', 'aspdPct', 1.2, 'root', 3),
+    passiveNode('leafA', '피해 분산', 'shield', 'shieldPct', 1.3, 'branchA', 3),
+    passiveNode('leafB', '도발의 기백', 'target', 'critChanceAdd', 1.3, 'branchB', 3),
+    activeNode('capstone', '철벽 선언', 'bolt', 'leafB', 3, 'guard', 0.4),
   ],
 };
 
@@ -163,9 +198,11 @@ const NAME_PARTS = {
   ranged_single: ['스나이퍼', '레이븐', '이글아이'],
   buff_debuff: ['커스', '위더', '헥스'],
   buff_support: ['오라클', '벡스틸러', '세인트'],
+  heal_support: ['세라핌', '메디쿠스', '라이프스프링'],
+  tank_guard: ['아이언월', '바스티온', '가디언'],
 };
 
-// Build the full unit-card catalogue: 6 tiers x 7 subtypes x 3 variants = 126 cards
+// Build the full unit-card catalogue: 6 tiers x 9 subtypes x 3 variants = 162 cards
 const UNIT_DEFS = [];
 (function buildCatalogue() {
   let uid = 0;
@@ -200,6 +237,7 @@ const UNIT_DEFS = [];
             cc: !!sub.cc,
             debuff: !!sub.debuff,
             support: !!sub.support,
+            guard: !!sub.guard,
           },
           traits: [
             { ...trait1, value: traitScale },

@@ -36,6 +36,8 @@ const ICON_DOM = {
   turret: '<rect x="7" y="13" width="10" height="7" rx="1.5"/><rect x="10" y="4" width="4" height="10" rx="1.5"/><circle cx="12" cy="4" r="2"/>',
   stun: '<path d="M12 3 L13.6 8.6 L19 7.2 L15.2 11.4 L19 15.6 L13.6 14.2 L12 20 L10.4 14.2 L5 15.6 L8.8 11.4 L5 7.2 L10.4 8.6 Z" fill="currentColor" stroke="none" fill-rule="evenodd"/>',
   skull: '<circle cx="12" cy="10" r="7"/><circle cx="9" cy="10" r="1.4" fill="currentColor" stroke="none"/><circle cx="15" cy="10" r="1.4" fill="currentColor" stroke="none"/><path d="M8 20 v-3 M12 20 v-3 M16 20 v-3" fill="none"/>',
+  heart: '<path d="M12 20 C4 14 2 9 5.2 6.2 C7.6 4 11 5 12 8.2 C13 5 16.4 4 18.8 6.2 C22 9 20 14 12 20 Z" fill="currentColor" stroke="none" fill-rule="evenodd"/>',
+  shield: '<path d="M12 3 L19 6 V11 C19 16 16 19.5 12 21 C8 19.5 5 16 5 11 V6 Z" fill="none"/><path d="M9 11.5 L11 13.5 L15.5 9" fill="none"/>',
 };
 
 function svgIcon(name, size = 18, color = 'currentColor') {
@@ -125,6 +127,28 @@ function drawGlyph(ctx, name, cx, cy, r, color) {
       ctx.arc(0, -2, 7, 0, Math.PI * 2); ctx.stroke();
       ctx.beginPath(); ctx.arc(-3, -2, 1.4, 0, Math.PI * 2); ctx.fill();
       ctx.beginPath(); ctx.arc(3, -2, 1.4, 0, Math.PI * 2); ctx.fill();
+      break;
+    case 'heart':
+      ctx.moveTo(0, 8);
+      ctx.bezierCurveTo(-8, 2, -9.5, -4, -6, -7);
+      ctx.bezierCurveTo(-3, -9.5, 0, -6.5, 0, -3.5);
+      ctx.bezierCurveTo(0, -6.5, 3, -9.5, 6, -7);
+      ctx.bezierCurveTo(9.5, -4, 8, 2, 0, 8);
+      ctx.closePath();
+      ctx.fill();
+      break;
+    case 'shield':
+      ctx.moveTo(0, -9);
+      ctx.lineTo(7, -6);
+      ctx.lineTo(7, 1);
+      ctx.bezierCurveTo(7, 6, 4, 9, 0, 10.5);
+      ctx.bezierCurveTo(-4, 9, -7, 6, -7, 1);
+      ctx.lineTo(-7, -6);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(-3.5, 0.5); ctx.lineTo(-1, 3); ctx.lineTo(4, -2.5);
+      ctx.stroke();
       break;
     default:
       ctx.arc(0, 0, 6, 0, Math.PI * 2); ctx.stroke();

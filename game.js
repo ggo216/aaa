@@ -32,7 +32,8 @@ for (let r = 0; r < GRID; r++)
   for (let c = 0; c < GRID; c++)
     INTERIOR.push({ c, r });
 
-const DECK_SIZE = 5;
+const DECK_SIZE = 8;
+const MONSTER_SWARM_CAP = 100; // instant game-over threshold if the field ever holds this many live monsters
 const BENCH_MAX = 5;
 
 function cellCenter(c, r) { return { x: MARGIN + c * CELL + CELL / 2, y: MARGIN + r * CELL + CELL / 2 }; }
@@ -84,7 +85,7 @@ const state = {
   wave: 0,
   bestWave: Number(localStorage.getItem('aaa_best_wave') || 0),
   waveTimer: 0,
-  waveDuration: 20,
+  waveDuration: 45,
   prepTimer: 3,
   gold: 50,
   gems: 0,
@@ -99,12 +100,13 @@ const state = {
   activeDeck: [], // up to DECK_SIZE defIds; only these are summonable
   deckBonus: {},
   runUpgrades: {}, // defId -> level; gold-funded, in-run only, resets on reload/restart
-  labTokens: {}, // subKey -> token count, earned 2 per card enhancement level-up
-  masteryPoints: 0, // 공용 마스터리: universal points (also +2 per card level-up), usable on ANY subtype's tree
+  labTokens: {}, // legacy per-subtype pool from before the token/mastery merge — kept only
+                  // so reconcileLabPoints() can fold an old save's leftover balance into
+                  // masteryPoints on load; nothing writes to this anymore
+  masteryPoints: 0, // 연구실 포인트: single shared pool, 4 per card enhancement level-up, spendable on ANY subtype's tree
   labProgress: {}, // subKey -> { nodeId -> level }, persistent, benefits every card of that subtype
   labSelectedSub: 'atk_single',
   bulkSellMaxGrade: BULK_SELL_MAX_GRADE, // player-adjustable in-run via the grade picker next to 일괄 판매; defaults to the same 'A' ceiling as before
-  allyBuff: null, // { until, atkPct, aspdPct } set by a buff_support legendary skill activation
   instSeq: 0,
   selected: null, // {kind:'bench', idx} | {kind:'field', key}
   selectedAt: 0, // timestamp of the last selection change, for a quick range-indicator fade-in
@@ -115,8 +117,14 @@ const state = {
   turrets: [], // temporary buff_support deployables, see spawnTurret/tickTurrets
   rings: [], // fast expand/fade shockwave rings (atk_multi big explosion), see spawnShockRing
   bolts: [], // jagged lightning polylines (ranged_single chain lightning), see spawnBolt
+  bombs: [], // pending bomb-attach detonations (atk_single capstone), see attachBomb/tickBombs
+  meteors: [], // telegraphed delayed AoE strikes (magic_multi capstone), see spawnMeteor/tickMeteors
+  lasers: [], // sustained/piercing beam VFX (ranged_single capstone), see spawnLaserBeam
   speedMult: 1,
-  bossAliveThisWave: false,
+  // now a COUNTER (not boolean): with boss-count-per-wave scaling (see beginWave), a boss
+  // wave can spawn several bosses at once, so this tracks how many are still alive rather
+  // than a single true/false — endWave()'s fail check needs ALL of them dead, not just one
+  bossAliveThisWave: 0,
   bossKilledInTime: true,
 };
 
@@ -203,6 +211,9 @@ function tryRestoreRunSnapshot() {
     // than trusting every restored instance to already carry it
     for (const [key, inst] of Object.entries(state.placed)) {
       if (!inst.center) { const [c, r] = key.split(',').map(Number); inst.center = cellCenter(c, r); }
+      // a snapshot saved before the unit-HP system existed won't carry hp/maxHp either —
+      // same "re-derive on restore" treatment as .center just above
+      if (typeof ensureUnitHp === 'function') ensureUnitHp(inst);
     }
     state.bench = snap.bench || [];
     state.runUpgrades = snap.runUpgrades || {};
@@ -228,6 +239,10 @@ function tryRestoreRunSnapshot() {
 // ---------------- deck / collection / units ----------------
 function startingDeck() {
   const picks = [];
+  // deliberately still just 3 core-damage subtypes (atk/ranged/magic) even now that there
+  // are 9 subtypes total (healer/tanker added) — a brand new run needs to be able to KILL
+  // things from turn one; healer/tanker are support pieces that are only useful once the
+  // player already has damage on the field, so they stay gacha-acquired rather than starters
   const wanted = ['atk_single', 'ranged_single', 'magic_multi'];
   for (const w of wanted) {
     const def = UNIT_DEFS.find(d => d.tierId === 'normal' && d.subKey === w && d.variant === 'I');
@@ -247,11 +262,12 @@ function enhanceCard(defId) {
   entry.count -= req;
   entry.level += 1;
   const def = UNIT_DEFS_BY_ID[defId];
-  // every card level-up feeds 2 연구실 skill tokens into that subtype's tree, AND
-  // 2 공용 마스터리 포인트that can be spent on ANY subtype's tree
-  state.labTokens[def.subKey] = (state.labTokens[def.subKey] || 0) + 2;
-  state.masteryPoints = (state.masteryPoints || 0) + 2;
-  log(`${def.name} 강화! Lv.${entry.level} (+2 ${SUBTYPES[def.subKey].name} 토큰, +2 공용 마스터리)`);
+  // every card level-up feeds 4 연구실 포인트 into the single shared pool, spendable on
+  // ANY subtype's tree — this used to be split into a subtype-locked token (2) plus a
+  // separate universal mastery point (2), but having two currencies for the same thing
+  // was just confusing (they even looked alike), so it's one pool now
+  state.masteryPoints = (state.masteryPoints || 0) + 4;
+  log(`${def.name} 강화! Lv.${entry.level} (+4 연구실 포인트)`);
   render();
 }
 
@@ -270,9 +286,7 @@ function bulkEnhanceAll() {
       ups++;
     }
     if (ups > 0) {
-      const def = UNIT_DEFS_BY_ID[defId];
-      state.labTokens[def.subKey] = (state.labTokens[def.subKey] || 0) + 2 * ups;
-      state.masteryPoints = (state.masteryPoints || 0) + 2 * ups;
+      state.masteryPoints = (state.masteryPoints || 0) + 4 * ups;
       totalUps += ups;
     }
   }
@@ -300,13 +314,13 @@ function toggleDeckCard(defId) {
 
 // ---------------- in-run gold upgrades (per run only, resets on restart) ----------------
 const RUN_UPGRADE_STAT_BONUS = { atk: 0.09, range: 0.04, aspd: 0.05 };
-const RUN_UPGRADE_MAX_LEVEL = 8;
+// no level cap — cost keeps climbing (25 + level*20) so it's naturally self-limiting
+// by the run's gold economy rather than an artificial ceiling
 function runUpgradeCost(level) { return 25 + level * 20; }
 
 function upgradeRunType(defId) {
   if (!state.activeDeck.includes(defId) || state.phase === 'gameover') return;
   const lvl = state.runUpgrades[defId] || 0;
-  if (lvl >= RUN_UPGRADE_MAX_LEVEL) return;
   const cost = runUpgradeCost(lvl);
   if (state.gold < cost) return;
   state.gold -= cost;
@@ -317,12 +331,16 @@ function upgradeRunType(defId) {
 }
 
 // ---------------- deck set bonuses ----------------
-const CAT_LABEL = { attack: '공격형', magic: '마법형', ranged: '원거리형', buff: '버프형' };
+const CAT_LABEL = { attack: '공격형', magic: '마법형', ranged: '원거리형', buff: '버프형', support: '지원형', guard: '수호형' };
 const CAT_EFFECT = {
   attack: { key: 'atkPct', label: '공격력' },
   magic: { key: 'critChanceAdd', label: '치명타 확률', suffix: '%p' },
   ranged: { key: 'aspdPct', label: '공격속도' },
   buff: { key: 'bossDmgAdd', label: '보스 피해' },
+  // healer/tanker (#3/#4) reuse existing bonus keys rather than plumbing brand new ones
+  // through computeStats — aspd for healer (faster heal cadence), atk for tanker
+  support: { key: 'aspdPct', label: '공격속도' },
+  guard: { key: 'atkPct', label: '공격력' },
 };
 
 function computeDeckBonuses() {
@@ -382,14 +400,11 @@ function upgradeLabNode(subKey, nodeId) {
   if (!node || !labNodeUnlocked(subKey, node)) return;
   const level = labNodeLevel(subKey, nodeId);
   const cost = labNodeCost(level);
-  const tokens = state.labTokens[subKey] || 0;
   const mastery = state.masteryPoints || 0;
-  if (tokens + mastery < cost) return;
-  // spend the subtype's own tokens first, then draw the remainder from the
-  // universal 공용 마스터리 pool (usable on any subtype's tree)
-  const fromTokens = Math.min(tokens, cost);
-  state.labTokens[subKey] = tokens - fromTokens;
-  state.masteryPoints = mastery - (cost - fromTokens);
+  if (mastery < cost) return;
+  // single shared pool now — see enhanceCard()'s comment for why the old
+  // subtype-locked-token + universal-mastery split was merged into one
+  state.masteryPoints = mastery - cost;
   state.labProgress[subKey] = state.labProgress[subKey] || {};
   state.labProgress[subKey][nodeId] = level + 1;
   log(`${node.name} Lv.${level + 1} 습득!`);
@@ -413,6 +428,7 @@ function computeLabBonus(subKey) {
     atkPct: 0, aspdPct: 0, critChanceAdd: 0, slowAdd: 0, debuffPct: 0, rangePct: 0, skillDmgPct: 0,
     normalDmgPct: 0, bossDmgPct: 0, splashPct: 0, dotChance: 0, extraAtkChance: 0,
     auraCritChance: 0, auraCritDmg: 0, auraBossDmg: 0,
+    healPct: 0, shieldPct: 0, guardHpPct: 0, // heal_support / tank_guard (#3/#4) lab-tree effects
   };
   const tree = LAB_TREES[subKey];
   if (!tree) return bonus;
@@ -427,7 +443,15 @@ function computeLabBonus(subKey) {
 
 function makeInstance(defId, grade) {
   state.instSeq++;
-  return { instId: 'i' + state.instSeq, defId, grade: grade.id, cooldown: 0, cellKey: null, buffs: null, skillCooldown: SKILL_INTERVAL };
+  return {
+    instId: 'i' + state.instSeq, defId, grade: grade.id, cooldown: 0, cellKey: null, buffs: null, skillCooldown: SKILL_INTERVAL,
+    // hp/maxHp: null until ensureUnitHp() first computes them (at placement) — a unit
+    // sitting on the bench never takes damage, so there's no need to eagerly compute stats
+    hp: null, maxHp: null,
+    weaken: null, // { atkMult, aspdMult, until } — applied by boss/mid-boss debuff skills, see applyUnitWeaken()
+    frenzyUntil: 0, // atk_multi legendary skill self-buff window (aspd x3), see triggerLegendarySkill
+    healCooldown: 0, // heal_support's periodic heal tick, independent of its (weak) normal attack cooldown
+  };
 }
 
 // O(1) lookups instead of UNIT_DEFS.find()/GRADES.find() linear scans — these run
@@ -471,7 +495,8 @@ function computeStats(instance) {
     if (t.key === 'slow') slow += t.value;
     if (t.key === 'targets') targets += Math.max(1, Math.round(t.value / 10));
   }
-  // apply live support buffs from nearby buff_support units
+  // apply live support buffs from nearby buff_support units / buff zones / guard auras
+  let dmgReductionPct = 0;
   if (instance.buffs) {
     atk *= (1 + (instance.buffs.atk || 0) / 100);
     aspd *= (1 + (instance.buffs.aspd || 0) / 100);
@@ -479,6 +504,19 @@ function computeStats(instance) {
     critChance += (instance.buffs.critChance || 0);
     critDmg += (instance.buffs.critDmg || 0);
     bossDmg += (instance.buffs.bossDmg || 0);
+    // damage reduction from tank_guard auras / tank_guard legendary shield — capped well
+    // below 100% so a guarded unit can still eventually die, never becomes truly invincible
+    dmgReductionPct = Math.min(75, instance.buffs.dmgReductionPct || 0);
+  }
+  // boss/mid-boss debuff skill: temporarily weakens this unit's atk/aspd (refreshes/
+  // strengthens rather than stacking, same pattern as the monster-side applyX helpers)
+  if (instance.weaken && performance.now() < instance.weaken.until) {
+    atk *= instance.weaken.atkMult;
+    aspd *= instance.weaken.aspdMult;
+  }
+  // 광란(frenzy, atk_multi 레전더리 스킬): 짧은 시간 자신의 공격속도 폭증
+  if (instance.frenzyUntil && performance.now() < instance.frenzyUntil) {
+    aspd *= 3;
   }
   // apply deck composition set bonuses
   const db = state.deckBonus;
@@ -498,20 +536,30 @@ function computeStats(instance) {
   let splashPct = lab.splashPct || 0;
   let dotChance = lab.dotChance || 0;
   let extraAtkChance = lab.extraAtkChance || 0;
+  let healPct = lab.healPct || 0;
+  let shieldPct = lab.shieldPct || 0;
+  let guardHpPct = lab.guardHpPct || 0;
   atk *= (1 + (lab.atkPct || 0) / 100);
   aspd *= (1 + (lab.aspdPct || 0) / 100);
   range *= (1 + (lab.rangePct || 0) / 100);
   critChance += (lab.critChanceAdd || 0);
   slow += (lab.slowAdd || 0);
   bossDmg += (lab.bossDmgPct || 0);
-  // field-wide temporary buff from a buff_support legendary skill activation
-  if (state.allyBuff && performance.now() < state.allyBuff.until) {
-    atk *= (1 + (state.allyBuff.atkPct || 0) / 100);
-    aspd *= (1 + (state.allyBuff.aspdPct || 0) / 100);
-  }
+
+  // ---- unit max HP (see #6): placed units now have hp that can reach 0 ----
+  // base scales the same way atk/range/aspd already do — grade + card tier + enhancement
+  // level + in-run gold upgrade — plus a per-subtype hpMult (tanker built to tank, ranged/
+  // support are glass) and its own lab-tree self-bonus (tank_guard's 생명력 강화 node)
+  const HP_BASE = 40;
+  const sub = SUBTYPES[def.subKey];
+  let maxHp = HP_BASE * (sub.hpMult || 1) * grade.mult * (TIERS_BY_ID[def.tierId] ? TIERS_BY_ID[def.tierId].mult : 1)
+    * (1 + lvl * 0.05) * (1 + runLvl * 0.04);
+  if (def.subKey === 'tank_guard') maxHp *= (1 + guardHpPct / 100);
+
   return {
     atk, range, aspd, critChance, critDmg, bossDmg, slow, targets, debuffPct, skillDmgPct,
-    normalDmgPct, splashPct, dotChance, extraAtkChance,
+    normalDmgPct, splashPct, dotChance, extraAtkChance, healPct, shieldPct, guardHpPct,
+    maxHp, dmgReductionPct,
     splash: def.base.splash, cc: def.base.cc, debuff: def.base.debuff, support: def.base.support,
     fullRange: !!grade.fullRange,
   };
@@ -533,6 +581,49 @@ function monsterSpeedForWave(wave, kind) {
   return s;
 }
 
+// ---------------- monsters attacking units (#7) ----------------
+// only mid-bosses and bosses attack placed units — regular monsters just march the track
+// as before. IMPORTANT: unlike monster HP (which grows exponentially with wave, matched
+// against units' own exponentially-growing DPS from grade/tier/enhancement/run-upgrades),
+// placed UNIT hp does NOT scale with wave at all (see computeStats' maxHp calc) — only
+// grade/card-tier/enhancement/run-level. Reusing monsterHpForWave's 1.15^wave curve here
+// was tried first and one-shot even a tanker within ~15 waves. Linear growth, capped at
+// wave 40 (same "cap the scaling, let boss COUNT carry later difficulty" idea already
+// used by monsterSpeedForWave), keeps this a real threat without trivializing unit HP.
+function monsterAtkForWave(wave, kind) {
+  const base = 4 + Math.min(wave, 40) * 0.6;
+  if (kind === 'boss') return base * 2.2;
+  if (kind === 'mid') return base * 1.2;
+  return 0;
+}
+// "medium or higher" range per the design ask — in CELL units so it reads consistently
+// with unit ranges (a typical unit sits around 1.0-2.5 CELL range)
+const MONSTER_ATK_RANGE = { mid: 2.1 * CELL, boss: 2.6 * CELL };
+const MONSTER_ATK_INTERVAL = { mid: 2.4, boss: 1.7 }; // seconds between basic attacks
+
+// ---------------- boss/mid-boss skill pool (#8) ----------------
+// beyond the basic periodic attack above, bosses/mid-bosses also use varied skills on
+// their OWN separate cooldown: damage, debuff (weaken nearby units), or buff (haste
+// nearby monsters). Bosses get the full pool and hit harder/more often; mid-bosses get
+// a smaller, weaker pool. No toast/shake per activation (see executeMonsterSkill) —
+// same "particle burst only" convention already used for legendary/capstone skills.
+const BOSS_SKILLS = [
+  { id: 'crush', kind: 'damage', mult: 2.2 },
+  { id: 'weaken', kind: 'debuff', atkMult: 0.65, aspdMult: 0.8, dur: 4500 },
+  { id: 'rally', kind: 'buff', speedMult: 1.7, dur: 3500 },
+];
+const MID_SKILLS = [
+  { id: 'strike', kind: 'damage', mult: 1.4 },
+  { id: 'weaken', kind: 'debuff', atkMult: 0.85, aspdMult: 0.92, dur: 3000 },
+];
+
+// object pool for monsters — recycled objects from monsterPool are reused instead of
+// allocating a fresh object every spawn (up to ~20+ spawns/wave, more at higher waves
+// with mid/boss overlap), cutting GC pressure that's especially costly as pauses on
+// mobile Safari. EVERY field a monster can carry over its whole life is reset in
+// spawnMonster below — not just the ones this function directly sets — since a reused
+// object could otherwise start life already "dying"/frozen/stunned from its last use.
+const monsterPool = [];
 function spawnMonster(kind) {
   const hp = monsterHpForWave(state.wave, kind);
   const speed = monsterSpeedForWave(state.wave, kind);
@@ -540,15 +631,22 @@ function spawnMonster(kind) {
   const lane = (Math.random() - 0.5) * 10; // small perpendicular jitter for visual spread
   const p = trackPoint(trackPos, lane);
   state.monsterSeq++;
-  const m = {
-    id: state.monsterSeq, kind, hp, maxHp: hp, speed,
-    trackPos, lane, x: p.x, y: p.y,
-    slowUntil: 0, slowFactor: 1, debuffUntil: 0, debuffAtkTakenMult: 1,
-    stunUntil: 0, // hard CC, separate mechanic from slow: tickMonsters skips movement entirely while now < stunUntil
-    dots: [], // { dmgPerTick, ticksLeft, nextTick }
-  };
+  const m = monsterPool.pop() || {};
+  m.id = state.monsterSeq; m.kind = kind; m.hp = hp; m.maxHp = hp; m.speed = speed;
+  m.trackPos = trackPos; m.lane = lane; m.x = p.x; m.y = p.y;
+  m.slowUntil = 0; m.slowFactor = 1; m.debuffUntil = 0; m.debuffAtkTakenMult = 1;
+  m.stunUntil = 0; // hard CC, separate mechanic from slow: tickMonsters skips movement entirely while now < stunUntil
+  m.dying = false; m.deathT = 0; m.frostStacks = 0; m.frostStackAt = 0;
+  if (m.dots) m.dots.length = 0; else m.dots = []; // reuse the array too, not just the object
+  // monster-attacks-units (#7) + boss/mid skills (#8) fields — always reset regardless of
+  // kind, since a recycled pooled object could otherwise start life mid-cooldown from a
+  // previous boss/mid use even though it just respawned as a plain 'normal' monster
+  m.atkCooldown = (kind === 'mid' || kind === 'boss') ? (0.6 + Math.random()) : 0;
+  m.skillCooldown = kind === 'boss' ? (3 + Math.random() * 3) : kind === 'mid' ? (5 + Math.random() * 3) : 0;
+  m.hasteUntil = 0; m.hasteMult = 1; // rally skill (buff other monsters), see applyMonsterHaste
+  m.bombTagged = false; // atk_single capstone bomb-attach marker, see attachBomb/tickBombs
   state.monsters.push(m);
-  if (kind === 'boss') state.bossAliveThisWave = true;
+  if (kind === 'boss') state.bossAliveThisWave = (state.bossAliveThisWave || 0) + 1;
 }
 
 // ---------------- wave flow ----------------
@@ -564,30 +662,37 @@ function beginWave() {
   // boss waves get a much longer clock (60s) than normal/mid waves (20s) — 20s was
   // too tight to actually track down and kill a boss before an automatic loss
   const isBossWave = state.wave % 10 === 0;
-  state.waveDuration = isBossWave ? 60 : 20;
+  state.waveDuration = isBossWave ? 90 : 45;
   state.waveTimer = state.waveDuration;
   document.getElementById('wavePrepOverlay').classList.add('hidden');
-  state.bossAliveThisWave = false;
+  state.bossAliveThisWave = 0;
   state.bossKilledInTime = true;
 
   const queue = [];
   for (let i = 0; i < 20; i++) queue.push({ t: (i / 20) * state.waveDuration, kind: 'normal' });
-  if (isBossWave) queue.push({ t: 1, kind: 'boss' });
-  else if (state.wave % 5 === 0) queue.push({ t: 1, kind: 'mid' });
+  if (isBossWave) {
+    // boss COUNT scales up every 30 waves (#9): waves 10/20 -> 1 boss, 30-50 -> 2,
+    // 60-80 -> 3, 90+ -> 4, capped at 5 so it ramps difficulty without becoming
+    // an unplayable flood. Staggered spawn times so they don't all appear on top
+    // of each other on the same instant.
+    const bossCount = Math.min(5, 1 + Math.floor(state.wave / 30));
+    for (let i = 0; i < bossCount; i++) queue.push({ t: 1 + i * 6, kind: 'boss' });
+  } else if (state.wave % 5 === 0) queue.push({ t: 1, kind: 'mid' });
   queue.sort((a, b) => a.t - b.t);
   state.spawnQueue = queue;
   state.spawnTimer = 0;
 }
 
 function endWave() {
-  // boss wave fail check
-  if (state.wave % 10 === 0 && state.bossAliveThisWave) {
+  // boss wave fail check — bossAliveThisWave is now a COUNTER (see #9), so this only
+  // clears once EVERY boss spawned this wave has been killed, not just one of several
+  if (state.wave % 10 === 0 && state.bossAliveThisWave > 0) {
     return gameOver('보스를 제한시간 내에 처치하지 못했습니다');
   }
   // no gold on wave-clear anymore — gold instead comes from killing monsters
   // during the wave (see onMonsterKilled), with bonus gold on mid/boss kills.
   // card coin still drops on wave clear as before.
-  const coinGain = 5 + state.wave * 2;
+  const coinGain = 3 + state.wave; // nerfed from 5+wave*2 — card-coin income (and thus how easily duplicates/gacha pulls pile up) was too generous
   state.cardCoin += coinGain;
   log(`웨이브 ${state.wave} 종료! +${coinGain} 카드코인`);
   showWaveToast(`WAVE ${state.wave} CLEAR`);
@@ -620,6 +725,7 @@ function resetRun() {
   state.wave = 0;
   state.phase = 'idle';
   state.waveTimer = 0;
+  for (const m of state.monsters) { if (monsterPool.length < 80) monsterPool.push(m); } // recycle for the next run too
   state.monsters = [];
   state.spawnQueue = [];
   state.spawnTimer = 0;
@@ -627,6 +733,7 @@ function resetRun() {
   state.bench = [];
   state.runUpgrades = {};
   state.selected = null;
+  for (const p of state.projectiles) { if (projectilePool.length < 60) projectilePool.push(p); }
   state.projectiles = [];
   state.particles = [];
   state.floatingTexts = [];
@@ -634,7 +741,10 @@ function resetRun() {
   state.turrets = [];
   state.rings = [];
   state.bolts = [];
-  state.bossAliveThisWave = false;
+  state.bombs = [];
+  state.meteors = [];
+  state.lasers = [];
+  state.bossAliveThisWave = 0;
   state.bossKilledInTime = true;
   document.getElementById('gameOverOverlay').classList.add('hidden');
   document.getElementById('wavePrepOverlay').classList.add('hidden');
@@ -699,7 +809,7 @@ function gachaNormal() {
   render();
 }
 
-const GACHA_BULK_COUNT = 10;
+const GACHA_BULK_COUNT = 30;
 function gachaBulkNormal() {
   const totalCost = GACHA_NORMAL_COST * GACHA_BULK_COUNT;
   if (state.cardCoin < totalCost) return;
@@ -757,6 +867,7 @@ function placeFromBench(idx) {
   state.bench.splice(idx, 1);
   placeUnitAt(inst, key);
   inst.placedAt = performance.now();
+  ensureUnitHp(inst);
   state.placed[key] = inst;
   state.selected = null;
   render();
@@ -781,6 +892,7 @@ function selectField(key) {
         state.placed[key] = inst;
       }
       inst.placedAt = performance.now();
+      ensureUnitHp(inst);
       state.selected = null;
       render();
       return;
@@ -812,6 +924,53 @@ function poofAt(key, color) {
   const [c, r] = key.split(',').map(Number);
   const center = cellCenter(c, r);
   spawnHitParticles(center.x, center.y, color, 10);
+}
+
+// ---------------- unit HP (#6): placed units can now take damage and die ----------------
+// lazily computes and stores a fresh hp/maxHp pair the first time a unit instance is
+// actually placed on the field — bench units never take damage so there's no need to
+// eagerly track hp for them. Safe to call repeatedly; only acts once (inst.hp == null).
+function ensureUnitHp(inst) {
+  if (inst.hp == null) {
+    const stats = computeStats(inst);
+    inst.maxHp = stats.maxHp;
+    inst.hp = stats.maxHp;
+  }
+}
+
+// distinct from poofAt() (sale): a darker, heavier burst + a shockring + a small
+// screen-shake, so a unit actually dying in combat reads as a loss, not a transaction
+function spawnUnitDeathBurst(x, y) {
+  spawnHitParticles(x, y, '#3a3f52', 16);
+  spawnShockRing(x, y, 34, '#3a3f52');
+  shakeScreen(3);
+}
+
+// removes a placed unit the same way selling does (state.placed + selection), but with
+// NO gold refund and a distinct "death" VFX instead of the sale poof
+function killUnit(key, inst) {
+  spawnUnitDeathBurst(inst.center.x, inst.center.y);
+  delete state.placed[key];
+  if (state.selected && state.selected.kind === 'field' && state.selected.key === key) state.selected = null;
+}
+
+// central damage entrypoint for anything that hurts a PLACED UNIT (monster basic attacks,
+// boss/mid-boss skills) — mirrors dealDamage()'s role for monsters. showText defaults to
+// true since unit damage is comparatively rare/high-signal, unlike monster DoT/splash spam.
+function damageUnit(key, inst, amount, showText = true) {
+  if (!inst || inst.hp == null) return;
+  // tank_guard aura / shield skills reduce incoming damage — capped at 75% so a guarded
+  // unit can still eventually die rather than becoming truly invincible
+  const reduction = Math.min(75, (inst.buffs && inst.buffs.dmgReductionPct) || 0);
+  amount *= (1 - reduction / 100);
+  inst.hp -= amount;
+  if (showText && state.floatingTexts.length < MAX_FLOATING_TEXTS) {
+    state.floatingTexts.push({
+      x: inst.center.x + (Math.random() * 10 - 5), y: inst.center.y - 26, t: 0, dur: 0.6,
+      value: Math.round(amount), unitDmg: true,
+    });
+  }
+  if (inst.hp <= 0) killUnit(key, inst);
 }
 
 function sellSelected() {
@@ -904,6 +1063,70 @@ function updateSupportBuffs() {
   }
 }
 
+// tank_guard's passive damage-reduction aura (#4) — a CONTINUOUS aura like buff_support's,
+// not an on-cooldown skill, so it must run every combat tick. Called AFTER
+// updateSupportBuffs() (which resets .buffs to null first) so it ADDS onto whatever that
+// pass already set, rather than wiping it — same additive-stacking pattern used there.
+function updateGuardAuras() {
+  const allPlaced = Object.entries(state.placed);
+  const guards = allPlaced.filter(([, inst]) => defOf(inst).base.guard);
+  if (guards.length === 0) return;
+  const guardLab = computeLabBonus('tank_guard');
+  for (const [key, gInst] of guards) {
+    const guardStats = computeStats(gInst);
+    const range = guardStats.range * CELL;
+    const center = gInst.center;
+    const grade = gradeOf(gInst);
+    const power = 12 + (grade.mult - 1) * 8 + guardLab.shieldPct * 0.6;
+    for (const [k2, tInst] of allPlaced) {
+      const p2 = tInst.center;
+      if (dist(center.x, center.y, p2.x, p2.y) <= range) { // includes the tanker itself (k2 === key allowed)
+        tInst.buffs = tInst.buffs || {};
+        tInst.buffs.dmgReductionPct = (tInst.buffs.dmgReductionPct || 0) + power;
+      }
+    }
+  }
+}
+
+// buff_support's reworked "zone" skill (#1, 오라클 리워크): instead of a global field-wide
+// buff, the legendary skill / lab capstone now drops a localized zone (see spawnZone kind
+// 'buff') that boosts whatever allies are standing IN it. This aggregates that onto
+// inst.buffs every tick, same additive pattern as the aura passes above.
+function updateZoneBuffs() {
+  const buffZones = state.zones.filter(z => z.kind === 'buff');
+  if (buffZones.length === 0) return;
+  for (const [, inst] of Object.entries(state.placed)) {
+    const c = inst.center;
+    for (const z of buffZones) {
+      if (dist(c.x, c.y, z.x, z.y) <= z.r) {
+        inst.buffs = inst.buffs || {};
+        inst.buffs.atk = (inst.buffs.atk || 0) + z.atkPct;
+        inst.buffs.aspd = (inst.buffs.aspd || 0) + z.aspdPct;
+      }
+    }
+  }
+}
+
+// heal_support's periodic heal-over-time (#3) — heals every damaged ally within range by
+// a flat-ish amount derived from its own atk stat, boosted by the healPct lab node.
+function doHealTick(inst, stats, center) {
+  const healAmount = stats.atk * 0.9 * (1 + stats.healPct / 100);
+  let healedAny = false;
+  for (const [, ally] of Object.entries(state.placed)) {
+    if (ally.hp == null || ally.maxHp == null) continue;
+    if (ally.hp >= ally.maxHp) continue;
+    const c2 = ally.center;
+    if (dist(center.x, center.y, c2.x, c2.y) > stats.range * CELL) continue;
+    ally.hp = Math.min(ally.maxHp, ally.hp + healAmount);
+    healedAny = true;
+    spawnHitParticles(c2.x, c2.y, '#3c9c68', 4);
+    if (state.floatingTexts.length < MAX_FLOATING_TEXTS) {
+      state.floatingTexts.push({ x: c2.x + (Math.random() * 10 - 5), y: c2.y - 26, t: 0, dur: 0.55, value: '+' + Math.round(healAmount), heal: true });
+    }
+  }
+  if (healedAny) spawnHitParticles(center.x, center.y, '#3c9c68', 3);
+}
+
 function findTargets(center, statsObj, count) {
   const inRange = state.monsters.filter(m => !m.dying && (statsObj.fullRange || dist(center.x, center.y, m.x, m.y) <= statsObj.range * CELL));
   if (count <= 1) {
@@ -953,21 +1176,41 @@ const MAX_PROJECTILES = 110;
 const MAX_ZONES = 14;
 const MAX_TURRETS = 8;
 
+// object pool for projectiles ("bullets") — mirrors the monster pool above: reuse a
+// recycled object instead of allocating a fresh one at every attack, cutting GC
+// pressure during heavy combat (particularly costly as pauses on mobile Safari)
+const projectilePool = [];
+function spawnProjectile(x1, y1, x2, y2, dur, color) {
+  if (state.projectiles.length >= MAX_PROJECTILES) return;
+  const p = projectilePool.pop() || {};
+  p.x1 = x1; p.y1 = y1; p.x2 = x2; p.y2 = y2; p.t = 0; p.dur = dur; p.color = color;
+  state.projectiles.push(p);
+}
+
 // lingering ground-effect areas (fire zones from magic_multi, plague zones from
-// buff_debuff). Duration/tick-cadence run on the speed-multiplied dt (via tickZones),
-// same as the rest of combat, so they read consistently at 1x and 10x game speed.
-function spawnZone(x, y, r, kind, dmgPerTick, tickInterval, duration) {
+// buff_debuff, buff zones from buff_support, tornado zones from atk_multi).
+// Duration/tick-cadence run on the speed-multiplied dt (via tickZones), same as the
+// rest of combat, so they read consistently at 1x and 10x game speed.
+// extra: { atkPct, aspdPct } for kind 'buff' (ignored otherwise). vx/vy: optional
+// per-second drift in px — used by 'tornado' zones so they travel instead of sitting still.
+function spawnZone(x, y, r, kind, dmgPerTick, tickInterval, duration, extra, vx, vy) {
   if (state.zones.length >= MAX_ZONES) return;
-  state.zones.push({ x, y, r, kind, dmgPerTick, tickInterval, tickTimer: tickInterval, life: duration, particleTimer: 0 });
+  state.zones.push({
+    x, y, r, kind, dmgPerTick, tickInterval, tickTimer: tickInterval, life: duration, particleTimer: 0,
+    atkPct: extra ? (extra.atkPct || 0) : 0, aspdPct: extra ? (extra.aspdPct || 0) : 0,
+    vx: vx || 0, vy: vy || 0,
+  });
 }
 
 function tickZones(dt) {
   if (state.zones.length === 0) return;
   for (const z of state.zones) {
+    if (z.vx || z.vy) { z.x += z.vx * dt; z.y += z.vy * dt; } // tornado: travels along its path
     z.life -= dt;
     z.tickTimer -= dt;
     z.particleTimer -= dt;
-    if (z.tickTimer <= 0) {
+    // buff zones don't damage monsters — they're handled separately by updateZoneBuffs()
+    if (z.tickTimer <= 0 && z.kind !== 'buff') {
       z.tickTimer += z.tickInterval;
       for (const m of state.monsters) {
         if (m.dying) continue;
@@ -987,6 +1230,37 @@ function tickZones(dt) {
           state.particles.push({
             x: px, y: py, vx: (Math.random() * 20 - 10), vy: -50 - Math.random() * 40,
             t: 0, dur: 0.35 + Math.random() * 0.2, color: Math.random() < 0.5 ? '#c17a41' : '#d19a5a', r: 2 + Math.random() * 2,
+          });
+        }
+      } else if (z.kind === 'buff') {
+        // buff zone (오라클 rework): gentle upward-drifting sparkle motes, golden-green —
+        // deliberately NOT the fire/plague drift so the buff zone reads as "blessing", not
+        // "hazard", at a glance across the field
+        z.particleTimer = 0.18;
+        if (state.particles.length < MAX_PARTICLES) {
+          const ang = Math.random() * Math.PI * 2;
+          const rr = Math.random() * z.r * 0.8;
+          state.particles.push({
+            x: z.x + Math.cos(ang) * rr, y: z.y + Math.sin(ang) * rr,
+            vx: (Math.random() * 8 - 4), vy: -26 - Math.random() * 16,
+            t: 0, dur: 0.5 + Math.random() * 0.25, color: Math.random() < 0.5 ? '#5cb37e' : '#e0c765', r: 1.6 + Math.random() * 1.6,
+          });
+        }
+      } else if (z.kind === 'tornado') {
+        // tornado: debris caught in a swirling orbit around the zone center instead of
+        // drifting up/down like fire or plague — its own distinct motion language since
+        // it's also the only zone type that itself travels across the field
+        z.particleTimer = 0.05;
+        if (state.particles.length < MAX_PARTICLES) {
+          const ang = Math.random() * Math.PI * 2;
+          const rr = z.r * (0.5 + Math.random() * 0.5);
+          const px = z.x + Math.cos(ang) * rr, py = z.y + Math.sin(ang) * rr;
+          // tangential velocity (perpendicular to the radius) so particles visibly orbit
+          // rather than fly outward, plus a slight inward pull to keep them circling
+          const tx = -Math.sin(ang), ty = Math.cos(ang);
+          state.particles.push({
+            x: px, y: py, vx: tx * 90 - Math.cos(ang) * 14, vy: ty * 90 - Math.sin(ang) * 14,
+            t: 0, dur: 0.3 + Math.random() * 0.15, color: '#8c8c96', r: 1.8 + Math.random() * 1.8,
           });
         }
       } else {
@@ -1030,9 +1304,7 @@ function tickTurrets(dt) {
         dealDamage(target, t.dmgPerTick, false, false);
         spawnHitParticles(target.x, target.y, '#379966', 4);
         t.fireFlash = performance.now(); // recoil scale-punch cue drawn in draw()
-        if (state.projectiles.length < MAX_PROJECTILES) {
-          state.projectiles.push({ x1: t.x, y1: t.y, x2: target.x, y2: target.y, t: 0, dur: 0.15, color: '#379966' });
-        }
+        spawnProjectile(t.x, t.y, target.x, target.y, 0.15, '#379966');
       }
     }
   }
@@ -1062,15 +1334,20 @@ function applyDot(m, dmgPerTick) {
   }
   m.dots.push({ dmgPerTick, ticksLeft: 3, nextTick: performance.now() + 900 });
 }
-function applyAllyBuff(atkPct, aspdPct, untilTs) {
+// boss/mid-boss debuff skill (#8): weakens a UNIT's atk/aspd — same refresh/strengthen
+// pattern as the monster-side applyX helpers above, just targeting a placed unit instance
+function applyUnitWeaken(inst, atkMult, aspdMult, untilTs) {
   const now = performance.now();
-  if (state.allyBuff && now < state.allyBuff.until) {
-    state.allyBuff.atkPct = Math.max(state.allyBuff.atkPct, atkPct);
-    state.allyBuff.aspdPct = Math.max(state.allyBuff.aspdPct, aspdPct);
-    state.allyBuff.until = Math.max(state.allyBuff.until, untilTs);
-  } else {
-    state.allyBuff = { until: untilTs, atkPct, aspdPct };
-  }
+  if (!inst.weaken || now >= inst.weaken.until) inst.weaken = { atkMult: 1, aspdMult: 1, until: 0 };
+  if (atkMult <= inst.weaken.atkMult) inst.weaken.atkMult = atkMult; // stronger (lower) wins
+  if (aspdMult <= inst.weaken.aspdMult) inst.weaken.aspdMult = aspdMult;
+  inst.weaken.until = Math.max(inst.weaken.until, untilTs);
+}
+// boss "rally" skill (#8): temporarily hastens a nearby MONSTER's move speed
+function applyMonsterHaste(m, mult, untilTs) {
+  const now = performance.now();
+  if (now >= m.hasteUntil || mult >= (m.hasteMult || 1)) m.hasteMult = mult;
+  m.hasteUntil = Math.max(m.hasteUntil || 0, untilTs);
 }
 
 // showText defaults to true for primary attacks. Secondary/incidental damage sources
@@ -1099,9 +1376,7 @@ function resolveHit(m, inst, stats, center) {
   if (m.kind === 'normal' && stats.normalDmgPct) dmg *= (1 + stats.normalDmgPct / 100);
   if (now < m.debuffUntil) dmg *= m.debuffAtkTakenMult; // debuff-type units mark targets to take extra damage
   dealDamage(m, dmg, crit);
-  if (state.projectiles.length < MAX_PROJECTILES) {
-    state.projectiles.push({ x1: center.x, y1: center.y, x2: m.x, y2: m.y, t: 0, dur: 0.15, color: crit ? '#bd9530' : '#4a72d6' });
-  }
+  spawnProjectile(center.x, center.y, m.x, m.y, 0.15, crit ? '#bd9530' : '#4a72d6');
   spawnHitParticles(m.x, m.y, crit ? '#bd9530' : '#4a72d6', crit ? 6 : 3);
   if (stats.cc) applySlow(m, Math.max(0.35, 1 - stats.slow / 100 - 0.3), now + 1500);
   if (stats.debuff) applyDebuffMult(m, 1.25 + stats.debuffPct / 100, now + 2000);
@@ -1249,18 +1524,67 @@ function triggerLabActiveSkill(inst, def, stats, center, capstoneLvl) {
   spawnHitParticles(center.x, center.y, '#4a72d6', 12);
 
   if (node.activeKind === 'ally') {
-    applyAllyBuff(15 + capstoneLvl * 2, 12 + capstoneLvl, now + 5000);
+    // 오라클 리워크 (#1): 전군 버프 대신 캐스터 주변 지역에만 적용되는 버프 지대
+    const zoneR = 2.0 * CELL;
+    spawnZone(center.x, center.y, zoneR, 'buff', 0, 0.5, 5, { atkPct: 12 + capstoneLvl * 3, aspdPct: 10 + capstoneLvl * 1.5 });
     spawnTurret(center.x, center.y, 2.5 * CELL, stats.atk * 0.5, 0.5, 5);
+    spawnShockRing(center.x, center.y, zoneR, '#3c9c68');
     return;
   }
-  const inRange = state.monsters.filter(m => stats.fullRange || dist(center.x, center.y, m.x, m.y) <= stats.range * CELL);
-  if (inRange.length === 0) return;
+  if (node.activeKind === 'heal') {
+    const inRangeAllies = Object.values(state.placed).filter(a => a.hp != null && dist(center.x, center.y, a.center.x, a.center.y) <= stats.range * CELL);
+    const healAmount = stats.atk * (1 + node.perLevel * capstoneLvl) * 2;
+    for (const a of inRangeAllies) {
+      a.hp = Math.min(a.maxHp, a.hp + healAmount);
+      spawnHitParticles(a.center.x, a.center.y, '#3c9c68', 6);
+    }
+    return;
+  }
+  if (node.activeKind === 'guard') {
+    // 철벽 선언: 사거리 내 아군에게 강력한 임시 피해감소 보호막 (자체 아우라와 별개로 추가 중첩)
+    for (const [k2, a] of Object.entries(state.placed)) {
+      if (dist(center.x, center.y, a.center.x, a.center.y) <= stats.range * CELL) {
+        a.buffs = a.buffs || {};
+        a.buffs.dmgReductionPct = Math.min(75, (a.buffs.dmgReductionPct || 0) + 20 + capstoneLvl * 3);
+      }
+    }
+    spawnShockRing(center.x, center.y, stats.range * CELL, '#7b8291');
+    return;
+  }
 
-  if (node.activeKind === 'single') {
+  const inRange = state.monsters.filter(m => stats.fullRange || dist(center.x, center.y, m.x, m.y) <= stats.range * CELL);
+  if (inRange.length === 0 && node.activeKind !== 'bomb' && node.activeKind !== 'meteor' && node.activeKind !== 'laser') return;
+
+  if (node.activeKind === 'bomb') {
+    // 폭탄 부착 (#2): 즉시 소량 피해 + 대상에게 폭탄을 부착해 지연 후 광역 폭발
+    if (inRange.length === 0) return;
     inRange.sort((a, b) => dist(center.x, center.y, a.x, a.y) - dist(center.x, center.y, b.x, b.y));
-    dealDamage(inRange[0], stats.atk * dmgMult, true);
-  } else if (node.activeKind === 'aoe') {
-    for (const m of inRange) dealDamage(m, stats.atk * dmgMult, true);
+    const target = inRange[0];
+    dealDamage(target, stats.atk * dmgMult * 0.3, false);
+    attachBomb(target, stats.atk * dmgMult, 1500);
+  } else if (node.activeKind === 'tornado') {
+    // 회오리 소환 (#2): 정적 광역 대신 경로를 따라 이동하는 지속피해 지대
+    const t = inRange[Math.floor(Math.random() * inRange.length)];
+    const angle = Math.atan2(t.y - center.y, t.x - center.x);
+    const speed = 65;
+    spawnZone(center.x, center.y, 40, 'tornado', stats.atk * dmgMult * 0.25, 0.35, 4, null, Math.cos(angle) * speed, Math.sin(angle) * speed);
+  } else if (node.activeKind === 'meteor') {
+    // 메테오 소환 (#2): 텔레그래프 후 지연 낙하하는 진짜 메테오
+    const t = inRange[Math.floor(Math.random() * inRange.length)];
+    spawnMeteor(t.x, t.y, stats.atk * dmgMult * 2.2, 55);
+  } else if (node.activeKind === 'laser') {
+    // 관통 레이저 (#2): 조준선 상의 모든 적을 관통하는 두꺼운 빔
+    if (inRange.length === 0) return;
+    inRange.sort((a, b) => dist(center.x, center.y, a.x, a.y) - dist(center.x, center.y, b.x, b.y));
+    const t = inRange[0];
+    const angle = Math.atan2(t.y - center.y, t.x - center.x);
+    const beamLen = stats.fullRange ? 2000 : stats.range * CELL;
+    const ex = center.x + Math.cos(angle) * beamLen, ey = center.y + Math.sin(angle) * beamLen;
+    spawnLaserBeam(center.x, center.y, ex, ey, '#2f8ab8');
+    for (const m of state.monsters) {
+      if (m.dying) continue;
+      if (pointToSegmentDist(m.x, m.y, center.x, center.y, ex, ey) <= 24) dealDamage(m, stats.atk * dmgMult, true);
+    }
   } else if (node.activeKind === 'freeze') {
     for (const m of inRange) { dealDamage(m, stats.atk * dmgMult, false); applySlow(m, 0.05, now + 2500); }
   } else if (node.activeKind === 'curse') {
@@ -1345,9 +1669,37 @@ function triggerLegendarySkill(inst, def, stats, center) {
   spawnHitParticles(center.x, center.y, '#c1465f', 14);
 
   if (def.subKey === 'buff_support') {
-    // temporary field-wide buff for every placed unit, read live in computeStats
-    applyAllyBuff(25 + stats.skillDmgPct * 0.4, 20, now + 5000);
+    // 오라클 리워크 (#1): 전군 버프 대신 캐스터 주변 지역 버프 지대 + 보조 터렛
+    const zoneR = 2.2 * CELL;
+    spawnZone(center.x, center.y, zoneR, 'buff', 0, 0.5, 6, { atkPct: 35 + stats.skillDmgPct * 0.5, aspdPct: 28 });
     spawnTurret(center.x, center.y, 2.5 * CELL, stats.atk * 0.5, 0.5, 5);
+    spawnShockRing(center.x, center.y, zoneR, '#3c9c68');
+    return;
+  }
+  if (def.subKey === 'heal_support') {
+    const inRangeAllies = Object.values(state.placed).filter(a => a.hp != null && dist(center.x, center.y, a.center.x, a.center.y) <= stats.range * CELL);
+    const healAmount = stats.atk * (skill.healMult || 2.5);
+    for (const a of inRangeAllies) {
+      a.hp = Math.min(a.maxHp, a.hp + healAmount);
+      spawnHitParticles(a.center.x, a.center.y, '#3c9c68', 8);
+    }
+    return;
+  }
+  if (def.subKey === 'tank_guard') {
+    // 불굴의 방벽: 사거리 내 아군에게 강력한 임시 피해감소 보호막
+    for (const a of Object.values(state.placed)) {
+      if (dist(center.x, center.y, a.center.x, a.center.y) <= stats.range * CELL) {
+        a.buffs = a.buffs || {};
+        a.buffs.dmgReductionPct = Math.min(75, (a.buffs.dmgReductionPct || 0) + 30);
+      }
+    }
+    spawnShockRing(center.x, center.y, stats.range * CELL, '#7b8291');
+    return;
+  }
+  if (def.subKey === 'atk_multi') {
+    // 광란 (#2 frenzy): 순간 피해 대신 자신의 공격속도를 짧게 폭증시키는 자가 버프
+    inst.frenzyUntil = now + 4000;
+    spawnHitParticles(center.x, center.y, '#c1465f', 16);
     return;
   }
 
@@ -1362,7 +1714,7 @@ function triggerLegendarySkill(inst, def, stats, center) {
       dealDamage(m, stats.atk * dmgMult, true);
       spawnHitParticles(m.x, m.y, '#c1465f', 8);
     }
-  } else if (def.subKey === 'atk_multi' || def.subKey === 'magic_multi') {
+  } else if (def.subKey === 'magic_multi') {
     for (const m of inRange) {
       dealDamage(m, stats.atk * dmgMult, true);
     }
@@ -1372,9 +1724,13 @@ function triggerLegendarySkill(inst, def, stats, center) {
       applySlow(m, 0.05, now + 2500);
     }
   } else if (def.subKey === 'buff_debuff') {
-    for (const m of inRange) {
-      dealDamage(m, stats.atk * dmgMult, false);
-      applyDebuffMult(m, 1.6 + stats.debuffPct / 100, now + 3000);
+    // 연쇄 저주 폭발 (#2 multi-burst): 짧은 시간 동안 여러 번의 보너스 공격을 몰아침 —
+    // resolveHit을 그대로 재사용하므로 버프형-디버프의 저주(debuff) 효과도 매 타격마다 자연히 재적용됨
+    inRange.sort((a, b) => dist(center.x, center.y, a.x, a.y) - dist(center.x, center.y, b.x, b.y));
+    for (let i = 0; i < 5; i++) {
+      const targets = findTargetsFromPool(inRange, stats.targets || 1);
+      if (targets.length === 0) break;
+      for (const m of targets) resolveHit(m, inst, stats, center);
     }
   }
 }
@@ -1383,11 +1739,19 @@ let combatTickId = 0;
 function tickCombat(dt) {
   combatTickId++; // bumped once per tick so computeLabBonus() can safely cache per-subtype within this tick
   updateSupportBuffs();
+  updateGuardAuras(); // tank_guard passive damage-reduction aura (#4)
+  updateZoneBuffs(); // buff_support zone-buff rework (#1)
   const now = performance.now();
   for (const [key, inst] of Object.entries(state.placed)) {
     const def = defOf(inst);
     const stats = computeStats(inst);
     const center = inst.center; // cached at placement time — see placeUnitAt()
+
+    // unit HP (#6) upkeep: lazily init (should already be set by ensureUnitHp() at
+    // placement, this is just a safety net) and clamp down if maxHp shrank/hp overflowed
+    if (inst.hp == null) inst.hp = stats.maxHp;
+    inst.maxHp = stats.maxHp;
+    if (inst.hp > inst.maxHp) inst.hp = inst.maxHp;
 
     if (!def.base.support) {
       inst.cooldown -= dt;
@@ -1457,10 +1821,27 @@ function tickCombat(dt) {
         triggerLabActiveSkill(inst, def, stats, center, capstoneLvl);
       }
     }
+
+    // heal_support (#3): periodic heal tick, independent of its own (weak) attack cooldown.
+    // unit deaths (from monster attacks/skills) only ever happen AFTER this per-unit loop
+    // finishes (see tickMonsterAttacks/tickMonsterSkills below), so `inst` here is always
+    // still alive/placed at this point in the tick.
+    if (def.subKey === 'heal_support') {
+      inst.healCooldown -= dt;
+      if (inst.healCooldown <= 0) {
+        const healInterval = 1.6 / Math.max(0.1, stats.aspd);
+        inst.healCooldown += healInterval;
+        doHealTick(inst, stats, center);
+      }
+    }
   }
   tickDots(dt);
   tickZones(dt);
   tickTurrets(dt);
+  tickMonsterAttacks(dt); // monsters attacking units (#7)
+  tickMonsterSkills(dt); // boss/mid-boss skill pool (#8)
+  tickBombs(); // bomb-attach delayed detonation (#2)
+  tickMeteors(dt); // meteor telegraph/impact (#2)
   // don't yank a killed monster out of existence on the exact frame it dies — mark it
   // "dying" and let the main loop fade/shrink it out over a short real-time window
   // (see the cosmetic-effects block in loop()), so kills read as an impact instead of
@@ -1485,7 +1866,7 @@ function onMonsterKilled(m) {
     if (Math.random() < 0.35) { state.gems += 1; log('중간보스 처치! 특수재화 +1'); pulseStat(HUD.collGemStat); }
     shakeScreen(4);
   } else if (m.kind === 'boss') {
-    state.bossAliveThisWave = false; // boss defeated in time -> wave can now clear normally
+    state.bossAliveThisWave = Math.max(0, (state.bossAliveThisWave || 0) - 1); // one fewer boss still alive; wave clears once this hits 0
     state.gold += 25 + state.wave * 4;
     const g = 2 + Math.floor(Math.random() * 3);
     state.gems += g;
@@ -1501,10 +1882,163 @@ function tickMonsters(dt) {
     if (m.dying) continue; // freeze in place while its death fade plays out
     if (now < m.stunUntil) continue; // stunned: fully immobilized, distinct from slow
     const slow = now < m.slowUntil ? m.slowFactor : 1;
-    m.trackPos += m.speed * slow * dt;
+    const haste = now < m.hasteUntil ? (m.hasteMult || 1) : 1; // boss "rally" skill (#8)
+    m.trackPos += m.speed * slow * haste * dt;
     const p = trackPoint(m.trackPos, m.lane);
     m.x = p.x; m.y = p.y;
   }
+}
+
+// ---------------- monster -> unit basic attacks (#7) ----------------
+// only mid-bosses/bosses attack; each on its own cooldown, targeting the nearest placed
+// unit within its (medium-or-higher) range. Visualized with a threatening-colored
+// projectile so a player can see WHY a unit's hp is dropping.
+function tickMonsterAttacks(dt) {
+  const placedList = Object.entries(state.placed);
+  if (placedList.length === 0) return;
+  for (const m of state.monsters) {
+    if (m.dying) continue;
+    if (m.kind !== 'mid' && m.kind !== 'boss') continue;
+    m.atkCooldown -= dt;
+    if (m.atkCooldown > 0) continue;
+    const range = MONSTER_ATK_RANGE[m.kind];
+    let best = null, bestD = Infinity;
+    for (const [key, inst] of placedList) {
+      // placedList is a snapshot taken once for the whole tick (see comment above); a
+      // unit killed by an earlier monster's attack THIS SAME tick is still present in
+      // it, so skip anything already dead/removed rather than re-"killing" a phantom
+      // and stealing an attack that should've gone to a still-living unit
+      if (inst.hp <= 0 || state.placed[key] !== inst) continue;
+      const d = dist(m.x, m.y, inst.center.x, inst.center.y);
+      if (d <= range && d < bestD) { bestD = d; best = [key, inst]; }
+    }
+    m.atkCooldown = MONSTER_ATK_INTERVAL[m.kind];
+    if (!best) continue;
+    const dmg = monsterAtkForWave(state.wave, m.kind);
+    spawnProjectile(m.x, m.y, best[1].center.x, best[1].center.y, 0.22, m.kind === 'boss' ? '#7a1f38' : '#8a4a1f');
+    damageUnit(best[0], best[1], dmg);
+  }
+}
+
+// ---------------- boss/mid-boss skills (#8) ----------------
+// separate cooldown from the basic attack above. No toast/shake on activation — same
+// "particle burst only" convention already used for legendary/lab capstone skills, since
+// several bosses/mid-bosses could otherwise spam a notification every few seconds.
+function tickMonsterSkills(dt) {
+  for (const m of state.monsters) {
+    if (m.dying) continue;
+    if (m.kind !== 'mid' && m.kind !== 'boss') continue;
+    m.skillCooldown -= dt;
+    if (m.skillCooldown > 0) continue;
+    const pool = m.kind === 'boss' ? BOSS_SKILLS : MID_SKILLS;
+    const skill = pool[Math.floor(Math.random() * pool.length)];
+    m.skillCooldown = m.kind === 'boss' ? (7 + Math.random() * 3) : (10 + Math.random() * 4);
+    executeMonsterSkill(m, skill);
+  }
+}
+
+function executeMonsterSkill(m, skill) {
+  const now = performance.now();
+  const baseRange = m.kind === 'boss' ? MONSTER_ATK_RANGE.boss : MONSTER_ATK_RANGE.mid;
+  if (skill.kind === 'damage') {
+    const range = baseRange * 1.15; // skills reach slightly further than the basic attack
+    let best = null, bestD = Infinity;
+    for (const [key, inst] of Object.entries(state.placed)) {
+      const d = dist(m.x, m.y, inst.center.x, inst.center.y);
+      if (d <= range && d < bestD) { bestD = d; best = [key, inst]; }
+    }
+    spawnHitParticles(m.x, m.y, m.kind === 'boss' ? '#7a1f38' : '#8a4a1f', 10);
+    if (best) {
+      const dmg = monsterAtkForWave(state.wave, m.kind) * skill.mult;
+      spawnProjectile(m.x, m.y, best[1].center.x, best[1].center.y, 0.28, '#c1465f');
+      damageUnit(best[0], best[1], dmg);
+    }
+  } else if (skill.kind === 'debuff') {
+    spawnHitParticles(m.x, m.y, '#6b4a9c', 10);
+    for (const [, inst] of Object.entries(state.placed)) {
+      if (dist(m.x, m.y, inst.center.x, inst.center.y) <= baseRange) {
+        applyUnitWeaken(inst, skill.atkMult, skill.aspdMult, now + skill.dur);
+      }
+    }
+  } else if (skill.kind === 'buff') {
+    spawnHitParticles(m.x, m.y, '#3c9c68', 10);
+    for (const other of state.monsters) {
+      if (other.dying || other === m) continue;
+      if (dist(m.x, m.y, other.x, other.y) <= baseRange * 1.3) {
+        applyMonsterHaste(other, skill.speedMult, now + skill.dur);
+      }
+    }
+  }
+}
+
+// ---------------- bomb-attach (atk_single capstone, #2) ----------------
+// attaches a delayed-detonation marker to a monster instead of an instant hit — tagged by
+// the monster's unique `id` (never reused, unlike the pooled object itself) so a detonation
+// scheduled against a monster that died/got recycled in the meantime harmlessly no-ops
+// rather than hitting whatever unrelated monster now occupies that pooled object.
+const MAX_BOMBS = 20;
+function attachBomb(m, dmg, delayMs) {
+  if (state.bombs.length >= MAX_BOMBS) return;
+  state.bombs.push({ monsterId: m.id, x: m.x, y: m.y, dmg, detonateAt: performance.now() + delayMs });
+  m.bombTagged = true;
+}
+function tickBombs() {
+  if (state.bombs.length === 0) return;
+  const now = performance.now();
+  const remaining = [];
+  for (const b of state.bombs) {
+    if (now < b.detonateAt) { remaining.push(b); continue; }
+    const target = state.monsters.find(x => x.id === b.monsterId && !x.dying);
+    const x = target ? target.x : b.x, y = target ? target.y : b.y;
+    if (target) target.bombTagged = false;
+    spawnShockRing(x, y, 60, '#c1465f');
+    spawnHitParticles(x, y, '#c1465f', 14);
+    shakeScreen(3);
+    for (const other of state.monsters) {
+      if (other.dying) continue;
+      if (dist(x, y, other.x, other.y) <= 60) dealDamage(other, b.dmg, false, false);
+    }
+  }
+  state.bombs = remaining;
+}
+
+// ---------------- meteor: telegraphed delayed AoE (magic_multi capstone, #2) ----------------
+const MAX_METEORS = 10;
+function spawnMeteor(x, y, dmg, radius) {
+  if (state.meteors.length >= MAX_METEORS) return;
+  state.meteors.push({ x, y, dmg, radius, t: 0, delay: 1.2, impacted: false });
+}
+function tickMeteors(dt) {
+  if (state.meteors.length === 0) return;
+  for (const mt of state.meteors) {
+    mt.t += dt;
+    if (!mt.impacted && mt.t >= mt.delay) {
+      mt.impacted = true;
+      spawnShockRing(mt.x, mt.y, mt.radius, '#8266bd');
+      spawnHitParticles(mt.x, mt.y, '#8266bd', 18);
+      shakeScreen(4);
+      for (const m of state.monsters) {
+        if (m.dying) continue;
+        if (dist(mt.x, mt.y, m.x, m.y) <= mt.radius) dealDamage(m, mt.dmg, false, false);
+      }
+    }
+  }
+  state.meteors = state.meteors.filter(mt => mt.t < mt.delay + 0.4);
+}
+
+// ---------------- laser: piercing beam along a line (ranged_single capstone, #2) ----------------
+const MAX_LASERS = 20;
+function spawnLaserBeam(x1, y1, x2, y2, color) {
+  if (state.lasers.length >= MAX_LASERS) return;
+  state.lasers.push({ x1, y1, x2, y2, t: 0, dur: 0.3, color });
+}
+// shortest distance from point (px,py) to the segment (x1,y1)-(x2,y2)
+function pointToSegmentDist(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const lenSq = dx * dx + dy * dy;
+  let t = lenSq === 0 ? 0 : ((px - x1) * dx + (py - y1) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  return dist(px, py, x1 + dx * t, y1 + dy * t);
 }
 
 // ---------------- main loop ----------------
@@ -1535,8 +2069,8 @@ function loop(now) {
       // they must NOT count toward the swarm cap — otherwise the very kill that should
       // have saved the player could still trigger a false game-over for ~0.28s
       const aliveCount = state.monsters.reduce((n, m) => n + (m.dying ? 0 : 1), 0);
-      if (aliveCount >= 50) {
-        gameOver('필드에 몬스터가 50마리 이상 쌓였습니다');
+      if (aliveCount >= MONSTER_SWARM_CAP) {
+        gameOver(`필드에 몬스터가 ${MONSTER_SWARM_CAP}마리 이상 쌓였습니다`);
       } else if (state.waveTimer <= 0) {
         endWave();
       }
@@ -1544,9 +2078,18 @@ function loop(now) {
 
     // purely cosmetic effects run on real time (rawDt), not the speed-multiplied dt,
     // so hit sparks/damage numbers stay readable instead of flashing by at 10x speed
-    state.projectiles = state.projectiles.filter(p => { p.t += rawDt; return p.t < p.dur; });
+    { // release expired projectiles back into the pool instead of letting the GC collect them
+      const survivingProjectiles = [];
+      for (const p of state.projectiles) {
+        p.t += rawDt;
+        if (p.t < p.dur) survivingProjectiles.push(p);
+        else if (projectilePool.length < 60) projectilePool.push(p);
+      }
+      state.projectiles = survivingProjectiles;
+    }
     state.rings = state.rings.filter(rg => { rg.t += rawDt; return rg.t < rg.dur; });
     state.bolts = state.bolts.filter(b => { b.t += rawDt; return b.t < b.dur; });
+    state.lasers = state.lasers.filter(lz => { lz.t += rawDt; return lz.t < lz.dur; });
     for (const pt of state.particles) { pt.x += pt.vx * rawDt; pt.y += pt.vy * rawDt; pt.vx *= 0.92; pt.vy *= 0.92; pt.t += rawDt; }
     state.particles = state.particles.filter(pt => pt.t < pt.dur);
     for (const ft of state.floatingTexts) { ft.y -= 24 * rawDt; ft.t += rawDt; }
@@ -1556,7 +2099,14 @@ function loop(now) {
     // read the same at 1x and 10x speed instead of vanishing instantly at high speed
     const DEATH_FADE_DUR = 0.28;
     for (const m of state.monsters) { if (m.dying) m.deathT += rawDt; }
-    state.monsters = state.monsters.filter(m => !m.dying || m.deathT < DEATH_FADE_DUR);
+    // release fully-faded monsters back into the pool instead of just dropping them
+    // for the GC — see spawnMonster()'s pooling comment
+    const survivingMonsters = [];
+    for (const m of state.monsters) {
+      if (!m.dying || m.deathT < DEATH_FADE_DUR) survivingMonsters.push(m);
+      else if (monsterPool.length < 80) monsterPool.push(m);
+    }
+    state.monsters = survivingMonsters;
 
     updateHud();
     draw();
@@ -1652,7 +2202,8 @@ function draw() {
     const pulse = 0.16 + Math.sin(nowZ / 300 + z.x) * 0.05;
     // radial gradient (hot core fading to edge) instead of a flat translucent disc —
     // reads much richer than a single solid fill, still one fillRect-cost draw call
-    const zCol = z.kind === 'fire' ? '193,122,65' : '138,122,156';
+    const ZONE_COLORS = { fire: '193,122,65', plague: '138,122,156', buff: '60,150,90', tornado: '140,140,150' };
+    const zCol = ZONE_COLORS[z.kind] || ZONE_COLORS.plague;
     const grad = ctx.createRadialGradient(z.x, z.y, 0, z.x, z.y, z.r);
     grad.addColorStop(0, `rgba(${zCol},${pulse * 1.8})`);
     grad.addColorStop(0.6, `rgba(${zCol},${pulse})`);
@@ -1669,19 +2220,81 @@ function draw() {
       ctx.strokeStyle = 'rgba(193,122,65,0.45)';
       ctx.lineWidth = 1.8;
       ctx.stroke();
+    } else if (z.kind === 'buff') {
+      // soft double-ring shimmer, no dashing/rotation — reads as a calm "blessing" field
+      // rather than the hazard-y spinning edges used by plague/tornado
+      const shimmer = 0.35 + Math.sin(nowZ / 260 + z.x) * 0.15;
+      ctx.beginPath();
+      ctx.arc(z.x, z.y, z.r, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(${zCol},${shimmer})`;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(z.x, z.y, z.r * 0.86, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(224,199,101,${shimmer * 0.7})`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    } else if (z.kind === 'tornado') {
+      // fast-spinning pinwheel spokes instead of a static/dashed edge — the one zone
+      // type that itself travels, so its edge should visibly "spin in place" too
+      ctx.save();
+      ctx.translate(z.x, z.y);
+      ctx.rotate(nowZ / 140);
+      ctx.strokeStyle = `rgba(${zCol},0.55)`;
+      ctx.lineWidth = 2;
+      for (let i = 0; i < 3; i++) {
+        const a = (Math.PI * 2 / 3) * i;
+        ctx.beginPath();
+        ctx.arc(0, 0, z.r, a, a + 0.9);
+        ctx.stroke();
+      }
+      ctx.restore();
     } else {
-      // slow dash-rotation edge, distinct from fire's pulsing
+      // slow dash-rotation edge (plague): distinct from fire's pulsing and the other two above
       ctx.save();
       ctx.setLineDash([4, 5]);
       ctx.lineDashOffset = -(nowZ / 40) % 100;
       ctx.beginPath();
       ctx.arc(z.x, z.y, z.r, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(138,122,156,0.5)';
+      ctx.strokeStyle = `rgba(${zCol},0.5)`;
       ctx.lineWidth = 1.5;
       ctx.stroke();
       ctx.restore();
     }
   }
+
+  // meteor telegraphs (magic_multi capstone, #2): a growing/pulsing warning ring at the
+  // impact point BEFORE it lands, so the strike reads as genuinely delayed/telegraphed
+  for (const mt of state.meteors) {
+    if (mt.impacted) continue;
+    const p = Math.min(1, mt.t / mt.delay);
+    ctx.beginPath();
+    ctx.arc(mt.x, mt.y, mt.radius * (0.5 + p * 0.5), 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(130,102,189,${0.3 + p * 0.5})`;
+    ctx.lineWidth = 2 + p * 2;
+    ctx.stroke();
+    ctx.fillStyle = `rgba(130,102,189,${0.06 + p * 0.1})`;
+    ctx.fill();
+  }
+
+  // laser beams (ranged_single capstone, #2): a thick fading beam, distinct from the
+  // thin jagged lightning bolt used elsewhere
+  for (const lz of state.lasers) {
+    const a = Math.max(0, 1 - lz.t / lz.dur);
+    ctx.beginPath();
+    ctx.moveTo(lz.x1, lz.y1); ctx.lineTo(lz.x2, lz.y2);
+    ctx.strokeStyle = hexToRgba(lz.color, a * 0.35);
+    ctx.lineWidth = 14 * a + 2;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(lz.x1, lz.y1); ctx.lineTo(lz.x2, lz.y2);
+    ctx.strokeStyle = hexToRgba('#ffffff', a * 0.85);
+    ctx.lineWidth = 3 * a + 0.6;
+    ctx.stroke();
+    ctx.lineCap = 'butt';
+  }
+
   // buff_support deployable turrets — quick scale-punch on fire, mirroring the same
   // attack-recoil technique used for placed units elsewhere in this function
   for (const t of state.turrets) {
@@ -1772,7 +2385,7 @@ function draw() {
     // buffed indicator: a soft pulsing ring around the whole unit (same pulse language
     // as boss/mid monsters elsewhere in this file) instead of a small static badge icon —
     // reads as "something is actively happening to this unit" at a glance on the field
-    const isBuffedNow = !!inst.buffs || (state.allyBuff && performance.now() < state.allyBuff.until);
+    const isBuffedNow = !!inst.buffs || (inst.frenzyUntil && performance.now() < inst.frenzyUntil);
     if (isBuffedNow) {
       const pulse = 3 + Math.sin(performance.now() / 220) * 2.5;
       ctx.beginPath();
@@ -1780,6 +2393,24 @@ function draw() {
       ctx.strokeStyle = 'rgba(55,153,102,0.45)';
       ctx.lineWidth = 2.5;
       ctx.stroke();
+    }
+
+    // tank_guard (#4): a standing translucent shield-aura ring, always visible on the
+    // tanker itself (not just when generically "buffed") so its passive damage-reduction
+    // aura reads as radiating FROM this unit, rather than looking identical to any other
+    // buffed ally's shared green pulse ring above. Slow, steady breathing motion —
+    // deliberately calmer than the buff pulse so it reads as "sturdy" not "excited".
+    if (def.base.guard) {
+      const breathe = 2 + Math.sin(performance.now() / 500) * 1.2;
+      ctx.beginPath();
+      ctx.arc(x, y, BADGE_R + 10 + breathe, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(74,114,214,0.28)';
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(x, y, BADGE_R + 10 + breathe, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(74,114,214,0.05)';
+      ctx.fill();
     }
 
     ctx.beginPath();
@@ -1795,6 +2426,19 @@ function draw() {
     ctx.strokeStyle = grade.color;
     ctx.stroke();
     drawGlyph(ctx, def.icon, x, y - 1, 8, '#2d3140');
+
+    // unit HP bar (#6): thin bar ABOVE the badge, deliberately distinct from monster hp
+    // bars (which sit above monster heads and go green->gold->red) — this one stays a
+    // steady blue/violet track so a glance never confuses "my unit" with "an enemy"
+    if (inst.maxHp) {
+      const hpW = BADGE_R * 1.7;
+      const hpPct = Math.max(0, inst.hp / inst.maxHp);
+      const hpY = y - BADGE_R - 9;
+      ctx.fillStyle = 'rgba(0,0,0,0.15)';
+      ctx.fillRect(x - hpW / 2, hpY, hpW, 4);
+      ctx.fillStyle = hpPct > 0.5 ? '#4a72d6' : hpPct > 0.2 ? '#8266bd' : '#c1465f';
+      ctx.fillRect(x - hpW / 2, hpY, hpW * hpPct, 4);
+    }
 
     // grade pill, fully clear of the circle below it (previously overlapped the icon)
     const pillY = y + BADGE_R + 10;
@@ -1949,6 +2593,7 @@ function draw() {
     if (!m.dying && nowTs < m.debuffUntil) activeIcons.push({ name: 'debuff', color: '#c1465f' });
     if (!m.dying && m.dots && m.dots.length > 0) activeIcons.push({ name: 'sparkle', color: '#c17a41' });
     if (!m.dying && nowTs < m.stunUntil) activeIcons.push({ name: 'stun', color: '#c9a227' });
+    if (!m.dying && m.bombTagged) activeIcons.push({ name: 'skull', color: '#c1465f' }); // bomb-attach marker (#2)
     activeIcons.forEach((icon, i) => {
       const bx = m.x - radius - 2 + i * 13;
       const by = my + radius + 8;
@@ -2043,6 +2688,21 @@ function draw() {
       ctx.strokeText(String(ft.value), 0, 0);
       ctx.fillStyle = '#c1465f';
       ctx.fillText(String(ft.value), 0, 0);
+    } else if (ft.heal) {
+      // heal_support ticks: green "+N", visually distinct from red/blue damage numbers
+      ctx.font = '800 13px sans-serif';
+      ctx.lineWidth = 3; ctx.strokeStyle = '#ffffff'; ctx.lineJoin = 'round';
+      ctx.strokeText(String(ft.value), 0, 0);
+      ctx.fillStyle = '#3c9c68';
+      ctx.fillText(String(ft.value), 0, 0);
+    } else if (ft.unitDmg) {
+      // damage taken by a PLACED UNIT (monster attack/skill) — a distinct dark-red tone
+      // so it never reads as just another monster-damage number
+      ctx.font = '800 13px sans-serif';
+      ctx.lineWidth = 3; ctx.strokeStyle = '#ffffff'; ctx.lineJoin = 'round';
+      ctx.strokeText('-' + String(ft.value), 0, 0);
+      ctx.fillStyle = '#7a1f38';
+      ctx.fillText('-' + String(ft.value), 0, 0);
     } else {
       ctx.font = '800 13px sans-serif';
       ctx.lineWidth = 3; ctx.strokeStyle = '#ffffff'; ctx.lineJoin = 'round';
@@ -2122,13 +2782,13 @@ function updateHud() {
   HUD.wave.textContent = state.wave;
   // dying (fading-out) monsters are cosmetic leftovers, not part of the live swarm count
   const aliveCount = state.monsters.reduce((n, m) => n + (m.dying ? 0 : 1), 0);
-  HUD.swarm.textContent = `${aliveCount}/50`;
+  HUD.swarm.textContent = `${aliveCount}/${MONSTER_SWARM_CAP}`;
   HUD.timer.textContent = state.phase === 'wave' ? Math.max(0, Math.ceil(state.waveTimer)) + 's' : '--';
   const isBossWave = state.wave > 0 && state.wave % 10 === 0;
   HUD.timerStat.classList.toggle('boss-wave', isBossWave && state.phase === 'wave');
-  HUD.timerStat.classList.toggle('urgent', isBossWave && state.phase === 'wave' && state.waveTimer <= 8 && state.bossAliveThisWave);
-  // early warning before the 50-monster instant game-over, mirroring the boss-timer urgency cue
-  HUD.swarmStat.classList.toggle('urgent', aliveCount >= 40);
+  HUD.timerStat.classList.toggle('urgent', isBossWave && state.phase === 'wave' && state.waveTimer <= 8 && state.bossAliveThisWave > 0);
+  // early warning before the swarm-cap instant game-over, mirroring the boss-timer urgency cue
+  HUD.swarmStat.classList.toggle('urgent', aliveCount >= MONSTER_SWARM_CAP * 0.8);
   syncCurrencyDisplays(true);
   const summonBtn = document.getElementById('summonBtn');
   if (summonBtn) {
@@ -2196,14 +2856,13 @@ function updateUpgradeListState() {
     const defId = row.dataset.defid;
     const rl = state.runUpgrades[defId] || 0;
     const cost = runUpgradeCost(rl);
-    const maxed = rl >= RUN_UPGRADE_MAX_LEVEL;
     const lvlTag = row.querySelector('.lvlTag');
     if (lvlTag) lvlTag.textContent = rl > 0 ? ` +${rl}` : '';
     const btn = row.querySelector('.upgradeBtn');
     if (!btn) return;
-    btn.disabled = maxed || state.gold < cost || state.phase === 'gameover';
-    btn.title = maxed ? '이번 판 최대 강화입니다' : state.gold < cost ? '골드가 부족합니다' : '';
-    btn.textContent = maxed ? 'MAX' : `+${cost}G`;
+    btn.disabled = state.gold < cost || state.phase === 'gameover';
+    btn.title = state.gold < cost ? '골드가 부족합니다' : '';
+    btn.textContent = `+${cost}G`;
   });
 }
 
@@ -2247,7 +2906,7 @@ function renderGame() {
       // currently buffed right now? shown as one compact badge — the field itself
       // (canvas pulsing ring, see draw()) is the primary indicator; this is just a
       // quick-glance confirmation, not a restatement of everything the buff grants
-      const isBuffedNow = !!inst.buffs || (state.allyBuff && performance.now() < state.allyBuff.until);
+      const isBuffedNow = !!inst.buffs || (inst.frenzyUntil && performance.now() < inst.frenzyUntil);
       selEl.innerHTML = `
         <div class="unitHead">
           <span class="unitIcon" style="color:${grade.color}">${svgIcon(def.icon, 22)}</span>
@@ -2393,65 +3052,51 @@ const LAB_EFFECT_LABELS = {
   normalDmgPct: '일반 몬스터 피해', bossDmgPct: '보스 피해', splashPct: '스플래시 피해',
   dotChance: '도트 확률', extraAtkChance: '추가 공격 확률',
   auraCritChance: '아군 치명타 확률(오라)', auraCritDmg: '아군 치명타 피해(오라)', auraBossDmg: '아군 보스 피해(오라)',
+  healPct: '치유량', shieldPct: '피해감소(오라)', guardHpPct: '최대 체력',
 };
-const LAB_ACTIVE_KIND_LABEL = { single: '단일 강타', aoe: '광역 폭발', freeze: '광역 빙결', curse: '광역 저주', ally: '전군 버프' };
+const LAB_ACTIVE_KIND_LABEL = {
+  single: '단일 강타', aoe: '광역 폭발', freeze: '광역 빙결', curse: '광역 저주', ally: '지역 버프',
+  bomb: '폭탄 부착', tornado: '이동 회오리', meteor: '메테오 낙하', laser: '관통 레이저',
+  heal: '대량 치유', guard: '보호막 선언',
+};
 
-// safety-net reconciliation: recomputes what every subtype's labTokens balance and the
-// universal masteryPoints balance SHOULD be — "earned" derived from the collection's
-// current enhancement levels (2 per level, the only source of these points), "spent"
-// derived from labProgress's current node levels (summing labNodeCost() for each
-// unlocked level, subtype tokens drawn down before mastery — the same order
-// upgradeLabNode() itself enforces) — and tops up any shortfall it finds. It NEVER
-// lowers an existing balance, only raises one that's below what full correct
-// accounting implies. This exists because a player reported cards clearly above Lv.1
-// with 0 tokens/mastery showing — after this session's heavy iteration (many local
-// saves, a cloud merge-logic change, etc), some historical inconsistency between
-// "cards leveled up" and "points actually recorded" was possible even though the
-// current enhance/spend code is correct going forward.
+// safety-net reconciliation: recomputes what the single shared 연구실 포인트 balance
+// SHOULD be — "earned" derived from the collection's current enhancement levels (4
+// per level, the only source of these points), "spent" derived from labProgress's
+// current node levels (summing labNodeCost() for each unlocked level across EVERY
+// subtype, since it's all one pool now) — and tops up any shortfall it finds. Also
+// folds in any leftover per-subtype state.labTokens from before the subtype-token /
+// universal-mastery split was merged into a single pool, so nobody's earlier progress
+// gets lost in the merge. Never lowers an existing balance, only raises one that's
+// below what full correct accounting implies.
 //
 // IMPORTANT: this is a ONE-TIME correction applied right after loading saved data
-// (init(), and once after a cloud merge), NOT something to call on every render. It
-// was originally wired into renderLabScreen() and that was itself a bug: "earned" and
-// "spent" here are recomputed from current TOTALS every call, an approximation of
-// history rather than a real transaction ledger, and reordering/interleaving of past
-// earns vs spends can make that approximation land slightly higher than the real
-// per-purchase split actually was. Since the function only ever raises a balance,
-// calling it after every purchase (render() runs after upgradeLabNode()) meant any
-// such mismatch silently topped the balance back up right after spending it down —
-// i.e. free/infinite lab upgrades. Running it once at load, before any purchases
-// happen in this session, gets the historical-correction benefit without that loop.
+// (init(), and once after a cloud merge), NOT something to call on every render — see
+// the git history/comments on this function for why calling it after every purchase
+// silently topped the balance back up right after spending it down (free upgrades).
 function reconcileLabPoints() {
-  let totalMasteryEarned = 0;
-  const earnedPerSub = {};
+  let totalEarned = 0;
   for (const defId of ownedDefIdList()) {
     const entry = state.collection[defId];
-    const def = UNIT_DEFS_BY_ID[defId];
-    if (!entry || !def || !entry.level) continue;
-    earnedPerSub[def.subKey] = (earnedPerSub[def.subKey] || 0) + entry.level * 2;
-    totalMasteryEarned += entry.level * 2;
+    if (!entry || !entry.level) continue;
+    totalEarned += entry.level * 4;
   }
-  let totalMasterySpent = 0;
+  let totalSpent = 0;
   for (const sk of Object.keys(LAB_TREES)) {
-    let spent = 0;
     for (const node of LAB_TREES[sk]) {
       const lvl = labNodeLevel(sk, node.id);
-      for (let L = 0; L < lvl; L++) spent += labNodeCost(L);
+      for (let L = 0; L < lvl; L++) totalSpent += labNodeCost(L);
     }
-    const earned = earnedPerSub[sk] || 0;
-    const fromTokens = Math.min(earned, spent);
-    totalMasterySpent += spent - fromTokens;
-    state.labTokens[sk] = Math.max(state.labTokens[sk] || 0, Math.max(0, earned - spent));
   }
-  state.masteryPoints = Math.max(state.masteryPoints || 0, Math.max(0, totalMasteryEarned - totalMasterySpent));
+  let legacyTokens = 0;
+  if (state.labTokens) { for (const v of Object.values(state.labTokens)) legacyTokens += v || 0; }
+  const expected = Math.max(0, totalEarned - totalSpent) + legacyTokens;
+  state.masteryPoints = Math.max(state.masteryPoints || 0, expected);
+  state.labTokens = {}; // fully folded into masteryPoints — don't double-count on a later call
 }
 
 function renderLabScreen() {
   const subKey = state.labSelectedSub;
-  const tokens = state.labTokens[subKey] || 0;
-  const subInfo = SUBTYPES[subKey];
-
-  document.getElementById('labTokenLabel').textContent = tokens;
-  document.getElementById('labTokenSubLabel').textContent = `${subInfo.name} 토큰`;
   const masteryLabel = document.getElementById('labMasteryLabel');
   if (masteryLabel) masteryLabel.textContent = state.masteryPoints || 0;
 
@@ -2481,7 +3126,7 @@ function renderLabScreen() {
       const level = labNodeLevel(subKey, nodeId);
       const unlocked = labNodeUnlocked(subKey, node);
       const cost = labNodeCost(level);
-      const canAfford = unlocked && (tokens + (state.masteryPoints || 0)) >= cost;
+      const canAfford = unlocked && (state.masteryPoints || 0) >= cost;
       const isActive = node.type === 'active';
       const card = document.createElement('div');
       card.className = 'labNode' + (isActive ? ' skillNode' : '') + (unlocked ? '' : ' locked') + (level > 0 ? ' active' : '');
@@ -2499,7 +3144,7 @@ function renderLabScreen() {
         <div class="labNodeName">${node.name}${isActive ? ' <span class="labSkillTag">스킬</span>' : ''}</div>
         <div class="labNodeEffect">${effectLine}</div>
         <div class="labNodeLevel">Lv.${level}</div>
-        <button class="labNodeBtn" ${canAfford ? '' : 'disabled'} title="${unlocked ? (canAfford ? '' : '토큰이 부족합니다') : `${node.requires.level}레벨을 먼저 해금하세요`}">${unlocked ? `강화 (${cost} 토큰)` : `Lv.${node.requires.level} 필요`}</button>
+        <button class="labNodeBtn" ${canAfford ? '' : 'disabled'} title="${unlocked ? (canAfford ? '' : '포인트가 부족합니다') : `${node.requires.level}레벨을 먼저 해금하세요`}">${unlocked ? (canAfford ? `강화 (${cost} 포인트)` : `포인트 부족 (${cost} 필요)`) : `Lv.${node.requires.level} 필요`}</button>
       `;
       card.querySelector('.labNodeBtn').onclick = () => upgradeLabNode(subKey, nodeId);
       rowEl.appendChild(card);

@@ -117,6 +117,10 @@ html, body {
 .stat.gold .statBadge { background: #f7f0da; color: #a5822f; }
 .stat.gem .statBadge { background: #f0ecf7; color: #8873bd; }
 .stat.coin .statBadge { background: #e7f2ea; color: #3c9c68; }
+/* deliberately NOT the same purple as .stat.gem (특수재화) — 공용 마스터리 is a
+   different currency and reusing the gem's exact look was confusing players into
+   thinking they were the same thing */
+.stat.mastery .statBadge { background: #e4f2f0; color: #2f8f82; }
 .stat.swarm .statBadge { background: #f7e9ec; color: var(--danger); }
 .stat.swarm b { color: var(--danger); }
 .stat.timer .statBadge { background: #eaeffb; color: #5273c9; }
@@ -316,7 +320,9 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 #deckPanel { flex: 1.4; min-width: 260px; }
 #gachaPanel { flex: 1; min-width: 220px; }
 
-.deckSlots { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
+/* DECK_SIZE is 8 — 4 columns so it lays out as two clean rows of 4 instead of an
+   uneven 5+3 wrap (leftover from when the deck was 5 slots) */
+.deckSlots { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
 .deckSlot {
   /* 20% smaller than the grid track it sits in (width:80% + margin:auto centers the
      shrunk box within its column), not just a smaller aspect-ratio target, so it
