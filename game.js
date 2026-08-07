@@ -211,11 +211,14 @@ function tryRestoreRunSnapshot() {
     // than trusting every restored instance to already carry it
     for (const [key, inst] of Object.entries(state.placed)) {
       if (!inst.center) { const [c, r] = key.split(',').map(Number); inst.center = cellCenter(c, r); }
-      // a snapshot saved before the unit-HP system existed won't carry hp/maxHp either —
-      // same "re-derive on restore" treatment as .center just above
+      // a snapshot saved before the unit-HP system (or several other fields since
+      // added) existed won't carry them — re-derive/default everything here rather
+      // than trusting a restored instance to already carry the current full shape
       if (typeof ensureUnitHp === 'function') ensureUnitHp(inst);
+      ensureUnitFields(inst);
     }
     state.bench = snap.bench || [];
+    for (const inst of state.bench) ensureUnitFields(inst); // same gap applies to bench units — hp is fine to stay null here (lazily computed on placement)
     state.runUpgrades = snap.runUpgrades || {};
     if (snap.activeDeck) state.activeDeck = snap.activeDeck.filter(id => state.collection[id]);
     updateDeckBonus();
@@ -868,6 +871,7 @@ function placeFromBench(idx) {
   placeUnitAt(inst, key);
   inst.placedAt = performance.now();
   ensureUnitHp(inst);
+  ensureUnitFields(inst);
   state.placed[key] = inst;
   state.selected = null;
   render();
@@ -893,6 +897,7 @@ function selectField(key) {
       }
       inst.placedAt = performance.now();
       ensureUnitHp(inst);
+      ensureUnitFields(inst);
       state.selected = null;
       render();
       return;
@@ -936,6 +941,22 @@ function ensureUnitHp(inst) {
     inst.maxHp = stats.maxHp;
     inst.hp = stats.maxHp;
   }
+}
+
+// defaults every field makeInstance() sets besides hp/maxHp (handled by ensureUnitHp)
+// and center/cellKey (handled by placeUnitAt) — call this on ANY unit instance that
+// might not have been created fresh via makeInstance() this session: a bench/placed
+// unit restored from an older local-storage snapshot predating one of these fields
+// would otherwise carry `undefined` into combat code that reads it unconditionally
+// (e.g. `inst.healCooldown -= dt`), decaying into a silent NaN/no-op bug rather than
+// a crash — annoying to debug and easy to miss, so just guarantee it never happens.
+function ensureUnitFields(inst) {
+  if (inst.buffs === undefined) inst.buffs = null;
+  if (typeof inst.cooldown !== 'number') inst.cooldown = 0;
+  if (typeof inst.skillCooldown !== 'number') inst.skillCooldown = SKILL_INTERVAL;
+  if (inst.weaken === undefined) inst.weaken = null;
+  if (typeof inst.frenzyUntil !== 'number') inst.frenzyUntil = 0;
+  if (typeof inst.healCooldown !== 'number') inst.healCooldown = 0;
 }
 
 // distinct from poofAt() (sale): a darker, heavier burst + a shockring + a small
@@ -2049,6 +2070,23 @@ function loop(now) {
   const rawDt = Math.min(0.05, (now - lastT) / 1000);
   lastT = now;
 
+  // the whole per-frame body is wrapped in try/catch: requestAnimationFrame(loop) at
+  // the bottom must ALWAYS fire, in ANY case, or a single uncaught exception anywhere
+  // in a frame's update (a bad restored save, an edge case in the newer monster-attack/
+  // boss-skill/zone code, anything) permanently kills the game loop with no visible
+  // error on iOS Safari — exactly matching reports of the game just freezing mid-play,
+  // freezing on the prep countdown, or the field going black after a reload. Catching
+  // and logging here means a single bad frame gets skipped instead of the whole game
+  // dying silently and forever.
+  try {
+    runFrame(rawDt);
+  } catch (e) {
+    console.error('[loop] frame error, skipping this frame:', e);
+  }
+  requestAnimationFrame(loop);
+}
+
+function runFrame(rawDt) {
   if (state.screen === 'game') {
     const dt = rawDt * state.speedMult;
 
@@ -2123,8 +2161,6 @@ function loop(now) {
     upgradeListAccum += rawDt;
     if (upgradeListAccum >= 0.25) { upgradeListAccum = 0; updateUpgradeListState(); }
   }
-
-  requestAnimationFrame(loop);
 }
 
 // ---------------- rendering (canvas) ----------------
