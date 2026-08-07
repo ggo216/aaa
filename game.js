@@ -1,4 +1,18 @@
 // ===================== AAA Defense - Game Logic =====================
+// per-subtype identity color: used to tint that subtype's basic-attack projectile/hit
+// particles so units read as visually distinct at a glance (crit still overrides to gold
+// everywhere it already did — this only changes the NON-crit baseline color per subKey)
+const SUBTYPE_COLORS = {
+  atk_single: '#e0553f',    // sharp red/orange
+  atk_multi: '#c17a41',     // warm amber (matches its existing explosion color)
+  magic_multi: '#e0803f',   // fire orange
+  magic_ctrl: '#5fb8d9',    // icy cyan
+  ranged_single: '#4a90d9', // steel blue (kept close to prior universal blue)
+  buff_debuff: '#8a5fc1',   // violet curse
+  buff_support: '#3c9c68',  // green (matches its existing buff-zone color)
+  heal_support: '#5fcf8a',  // soft green/white
+  tank_guard: '#9aa1ad',    // grey/steel
+};
 const GRID = 5;
 const CELL = 76; // smaller cells than before
 const MARGIN = 52; // space between canvas edge and the 5x5 grid, hosts the outer monster track
@@ -34,6 +48,7 @@ for (let r = 0; r < GRID; r++)
 
 const DECK_SIZE = 8;
 const MONSTER_SWARM_CAP = 100; // instant game-over threshold if the field ever holds this many live monsters
+const MAX_SPEED_MULT = 5; // was 10 — the highest multiplier was the single biggest per-frame cost spike
 const BENCH_MAX = 5;
 
 function cellCenter(c, r) { return { x: MARGIN + c * CELL + CELL / 2, y: MARGIN + r * CELL + CELL / 2 }; }
@@ -648,15 +663,19 @@ function spawnMonster(kind) {
   m.skillCooldown = kind === 'boss' ? (3 + Math.random() * 3) : kind === 'mid' ? (5 + Math.random() * 3) : 0;
   m.hasteUntil = 0; m.hasteMult = 1; // rally skill (buff other monsters), see applyMonsterHaste
   m.bombTagged = false; // atk_single capstone bomb-attach marker, see attachBomb/tickBombs
+  m.tauntedBy = null; m.tauntUntil = 0; // tank_guard taunt proc, see applyTaunt
   state.monsters.push(m);
   if (kind === 'boss') state.bossAliveThisWave = (state.bossAliveThisWave || 0) + 1;
 }
 
 // ---------------- wave flow ----------------
+// the 3-second "웨이브 시작까지" countdown was removed by request — starting/restarting
+// a run now drops straight into combat. Kept as a thin wrapper (rather than having
+// every caller call beginWave() directly) so the prep-overlay/phase machinery stays
+// intact in case a delayed start is wanted again later.
 function beginPrep() {
-  state.phase = 'prep';
-  state.prepTimer = 3;
-  document.getElementById('wavePrepOverlay').classList.remove('hidden');
+  document.getElementById('wavePrepOverlay').classList.add('hidden');
+  beginWave();
 }
 
 function beginWave() {
@@ -672,7 +691,8 @@ function beginWave() {
   state.bossKilledInTime = true;
 
   const queue = [];
-  for (let i = 0; i < 20; i++) queue.push({ t: (i / 20) * state.waveDuration, kind: 'normal' });
+  const NORMAL_SPAWNS_PER_WAVE = 15; // was 20, reduced by 5 per request
+  for (let i = 0; i < NORMAL_SPAWNS_PER_WAVE; i++) queue.push({ t: (i / NORMAL_SPAWNS_PER_WAVE) * state.waveDuration, kind: 'normal' });
   if (isBossWave) {
     // boss COUNT scales up every 30 waves (#9): waves 10/20 -> 1 boss, 30-50 -> 2,
     // 60-80 -> 3, 90+ -> 4, capped at 5 so it ramps difficulty without becoming
@@ -728,6 +748,7 @@ function resetRun() {
   state.wave = 0;
   state.phase = 'idle';
   state.waveTimer = 0;
+  combatAccum = 0; // don't carry leftover fixed-timestep debt into the next run
   for (const m of state.monsters) { if (monsterPool.length < 80) monsterPool.push(m); } // recycle for the next run too
   state.monsters = [];
   state.spawnQueue = [];
@@ -777,7 +798,10 @@ function showWaveToast(text) {
 }
 
 let shakeTime = 0, shakeMag = 0;
-function shakeScreen(mag) { shakeTime = 0.35; shakeMag = mag; }
+// screen shake removed by request — no-op kept (rather than deleting every call site)
+// so nothing throws; shakeTime/shakeMag simply never become nonzero, so draw()'s own
+// shake-offset code (gated on shakeTime>0) never runs either
+function shakeScreen(mag) { /* no-op */ }
 
 function pulseStat(statEl) {
   if (!statEl) return;
@@ -1049,6 +1073,21 @@ function bulkSell() {
 // ---------------- combat ----------------
 function dist(ax, ay, bx, by) { return Math.hypot(ax - bx, ay - by); }
 
+// buff-granting units (아군에게 뭔가를 주는 유닛: 오라클/지원, 탱커, 힐러) now have their
+// OWN buff/aura radius, independent of their normal attack-range stat — attack range
+// was nerfed earlier this session for combat balance, which was quietly shrinking these
+// units' support radius along with it even though "how far I can buff/heal/shield" isn't
+// really the same thing as "how far I can hit an enemy". Grows slightly with the card's
+// own enhancement level so investing in a support card keeps paying off even after its
+// lab tree is maxed out.
+const BUFF_AURA_RANGE = { buff_support: 2.2, tank_guard: 1.6, heal_support: 2.0 };
+const BUFF_AURA_RANGE_PER_LEVEL = 0.02; // +2% per enhancement level
+function buffAuraRange(inst) {
+  const base = BUFF_AURA_RANGE[defOf(inst).subKey];
+  if (!base) return 0;
+  return base * CELL * (1 + levelOf(inst.defId) * BUFF_AURA_RANGE_PER_LEVEL);
+}
+
 function updateSupportBuffs() {
   // computed once and reused for both the outer supports scan and the inner per-target
   // scan below — this used to call Object.entries(state.placed) fresh inside the outer
@@ -1063,7 +1102,7 @@ function updateSupportBuffs() {
   for (const [key, sInst] of supports) {
     const grade = gradeOf(sInst);
     const supportStats = computeStats(sInst); // respects enhancement/run-upgrade/deck bonuses on the buffer itself
-    const range = supportStats.range * CELL;
+    const range = buffAuraRange(sInst);
     const center = sInst.center; // cached at placement time — see placeUnitAt()
     const lvl = levelOf(sInst.defId);
     const runLvl = state.runUpgrades[sInst.defId] || 0;
@@ -1095,7 +1134,7 @@ function updateGuardAuras() {
   const guardLab = computeLabBonus('tank_guard');
   for (const [key, gInst] of guards) {
     const guardStats = computeStats(gInst);
-    const range = guardStats.range * CELL;
+    const range = buffAuraRange(gInst);
     const center = gInst.center;
     const grade = gradeOf(gInst);
     const power = 12 + (grade.mult - 1) * 8 + guardLab.shieldPct * 0.6;
@@ -1132,12 +1171,13 @@ function updateZoneBuffs() {
 // a flat-ish amount derived from its own atk stat, boosted by the healPct lab node.
 function doHealTick(inst, stats, center) {
   const healAmount = stats.atk * 0.9 * (1 + stats.healPct / 100);
+  const healRange = buffAuraRange(inst);
   let healedAny = false;
   for (const [, ally] of Object.entries(state.placed)) {
     if (ally.hp == null || ally.maxHp == null) continue;
     if (ally.hp >= ally.maxHp) continue;
     const c2 = ally.center;
-    if (dist(center.x, center.y, c2.x, c2.y) > stats.range * CELL) continue;
+    if (dist(center.x, center.y, c2.x, c2.y) > healRange) continue;
     ally.hp = Math.min(ally.maxHp, ally.hp + healAmount);
     healedAny = true;
     spawnHitParticles(c2.x, c2.y, '#3c9c68', 4);
@@ -1344,6 +1384,17 @@ function applyDebuffMult(m, mult, untilTs) {
   if (now >= m.debuffUntil || mult >= m.debuffAtkTakenMult) m.debuffAtkTakenMult = mult; // stronger or fresh wins
   m.debuffUntil = Math.max(m.debuffUntil, untilTs);
 }
+// tank_guard's taunt proc: a taunted mid/boss must prioritize whichever unit taunted
+// it (while still taunted and that unit is within its own attack/skill range) instead
+// of its normal nearest-target pick — see tickMonsterAttacks/tickMonsterSkills. A
+// fresh taunt from a DIFFERENT unit simply overrides the old one (there's only ever
+// one "most urgent threat" at a time, unlike stacking damage-style effects).
+function applyTaunt(m, tauntKey, untilTs) {
+  // a fresh taunt (from anyone) simply becomes the new most-urgent-threat, and the
+  // same taunter re-applying just extends their own duration rather than resetting it
+  m.tauntUntil = (m.tauntedBy === tauntKey) ? Math.max(m.tauntUntil || 0, untilTs) : untilTs;
+  m.tauntedBy = tauntKey;
+}
 function applyDot(m, dmgPerTick) {
   if (m.dots.length > 0) {
     // refresh the existing stack rather than piling on a second copy of the same DoT
@@ -1397,8 +1448,9 @@ function resolveHit(m, inst, stats, center) {
   if (m.kind === 'normal' && stats.normalDmgPct) dmg *= (1 + stats.normalDmgPct / 100);
   if (now < m.debuffUntil) dmg *= m.debuffAtkTakenMult; // debuff-type units mark targets to take extra damage
   dealDamage(m, dmg, crit);
-  spawnProjectile(center.x, center.y, m.x, m.y, 0.15, crit ? '#bd9530' : '#4a72d6');
-  spawnHitParticles(m.x, m.y, crit ? '#bd9530' : '#4a72d6', crit ? 6 : 3);
+  const subColor = SUBTYPE_COLORS[def.subKey] || '#4a72d6';
+  spawnProjectile(center.x, center.y, m.x, m.y, 0.15, crit ? '#bd9530' : subColor);
+  spawnHitParticles(m.x, m.y, crit ? '#bd9530' : subColor, crit ? 6 : 3);
   if (stats.cc) applySlow(m, Math.max(0.35, 1 - stats.slow / 100 - 0.3), now + 1500);
   if (stats.debuff) applyDebuffMult(m, 1.25 + stats.debuffPct / 100, now + 2000);
 
@@ -1471,6 +1523,19 @@ function resolveHit(m, inst, stats, center) {
       if (state.floatingTexts.length < MAX_FLOATING_TEXTS) {
         state.floatingTexts.push({ x: m.x, y: m.y - 20, t: 0, dur: 1.0, value: '즉사!', execute: true });
       }
+    }
+  }
+
+  // 수호형-탱커 전용: 기본공격 확률 기반 도발 — leafB "도발의 기백" 노드 레벨에서 직접
+  // 파생 (해당 노드가 이미 부여하는 critChanceAdd는 그대로 유지). 도발된 보스/중간보스는
+  // 사거리 내에 이 탱커가 있는 한 다른 유닛보다 우선 타겟한다 (tickMonsterAttacks/
+  // tickMonsterSkills 참고).
+  if (def.subKey === 'tank_guard' && !m.dying && inst.cellKey) {
+    const tauntNodeLvl = labNodeLevel('tank_guard', 'leafB');
+    const tauntChance = Math.min(35, 12 + tauntNodeLvl * 1.2); // %, small base + node-scaled, capped 35%
+    if (Math.random() * 100 < tauntChance) {
+      applyTaunt(m, inst.cellKey, now + 4000);
+      spawnHitParticles(m.x, m.y - 6, '#c9a24a', 5);
     }
   }
 }
@@ -1914,6 +1979,25 @@ function tickMonsters(dt) {
 // only mid-bosses/bosses attack; each on its own cooldown, targeting the nearest placed
 // unit within its (medium-or-higher) range. Visualized with a threatening-colored
 // projectile so a player can see WHY a unit's hp is dropping.
+// if this monster is currently taunted and the taunting unit is still alive AND within
+// `range`, it MUST be the target — otherwise fall back to the normal nearest-in-range
+// pick. Shared by both the basic-attack and skill target selection below.
+function pickTauntedOrNearest(m, placedList, range) {
+  if (m.tauntedBy && performance.now() < (m.tauntUntil || 0)) {
+    const tInst = state.placed[m.tauntedBy];
+    if (tInst && tInst.hp > 0 && dist(m.x, m.y, tInst.center.x, tInst.center.y) <= range) {
+      return [m.tauntedBy, tInst];
+    }
+  }
+  let best = null, bestD = Infinity;
+  for (const [key, inst] of placedList) {
+    if (inst.hp <= 0 || state.placed[key] !== inst) continue;
+    const d = dist(m.x, m.y, inst.center.x, inst.center.y);
+    if (d <= range && d < bestD) { bestD = d; best = [key, inst]; }
+  }
+  return best;
+}
+
 function tickMonsterAttacks(dt) {
   const placedList = Object.entries(state.placed);
   if (placedList.length === 0) return;
@@ -1923,16 +2007,11 @@ function tickMonsterAttacks(dt) {
     m.atkCooldown -= dt;
     if (m.atkCooldown > 0) continue;
     const range = MONSTER_ATK_RANGE[m.kind];
-    let best = null, bestD = Infinity;
-    for (const [key, inst] of placedList) {
-      // placedList is a snapshot taken once for the whole tick (see comment above); a
-      // unit killed by an earlier monster's attack THIS SAME tick is still present in
-      // it, so skip anything already dead/removed rather than re-"killing" a phantom
-      // and stealing an attack that should've gone to a still-living unit
-      if (inst.hp <= 0 || state.placed[key] !== inst) continue;
-      const d = dist(m.x, m.y, inst.center.x, inst.center.y);
-      if (d <= range && d < bestD) { bestD = d; best = [key, inst]; }
-    }
+    // placedList is a snapshot taken once for the whole tick; a unit killed by an
+    // earlier monster's attack THIS SAME tick is still present in it, so
+    // pickTauntedOrNearest() skips anything already dead/removed rather than
+    // re-"killing" a phantom and stealing an attack that should've gone elsewhere
+    const best = pickTauntedOrNearest(m, placedList, range);
     m.atkCooldown = MONSTER_ATK_INTERVAL[m.kind];
     if (!best) continue;
     const dmg = monsterAtkForWave(state.wave, m.kind);
@@ -1963,11 +2042,7 @@ function executeMonsterSkill(m, skill) {
   const baseRange = m.kind === 'boss' ? MONSTER_ATK_RANGE.boss : MONSTER_ATK_RANGE.mid;
   if (skill.kind === 'damage') {
     const range = baseRange * 1.15; // skills reach slightly further than the basic attack
-    let best = null, bestD = Infinity;
-    for (const [key, inst] of Object.entries(state.placed)) {
-      const d = dist(m.x, m.y, inst.center.x, inst.center.y);
-      if (d <= range && d < bestD) { bestD = d; best = [key, inst]; }
-    }
+    const best = pickTauntedOrNearest(m, Object.entries(state.placed), range);
     spawnHitParticles(m.x, m.y, m.kind === 'boss' ? '#7a1f38' : '#8a4a1f', 10);
     if (best) {
       const dmg = monsterAtkForWave(state.wave, m.kind) * skill.mult;
@@ -2066,6 +2141,18 @@ function pointToSegmentDist(px, py, x1, y1, x2, y2) {
 let lastT = performance.now();
 let snapshotAccum = 0;
 let upgradeListAccum = 0;
+// Fixed Time Step: at high speedMult, dt (= rawDt*speedMult) can be a fairly large
+// chunk of simulated time in one go — tickMonsters/tickCombat then have to do that
+// whole chunk of movement/combat resolution synchronously in a single frame, which is
+// exactly the kind of spike that hurt on mobile Safari. Splitting it into several
+// small FIXED_STEP-sized ticks (a standard fixed-timestep accumulator) spreads the
+// same total amount of simulated work across more, individually-cheaper calls instead
+// of one big one. combatAccum carries any leftover fractional step across frames so no
+// simulated time is silently lost; MAX_SUBSTEPS_PER_FRAME caps the worst case (a slow
+// frame) so catching up can never itself cascade into more slowness.
+const FIXED_STEP = 1 / 60;
+const MAX_SUBSTEPS_PER_FRAME = 8;
+let combatAccum = 0;
 function loop(now) {
   const rawDt = Math.min(0.05, (now - lastT) / 1000);
   lastT = now;
@@ -2090,19 +2177,29 @@ function runFrame(rawDt) {
   if (state.screen === 'game') {
     const dt = rawDt * state.speedMult;
 
-    if (state.phase === 'prep') {
-      state.prepTimer -= dt;
-      document.getElementById('prepCount').textContent = Math.max(0, Math.ceil(state.prepTimer));
-      if (state.prepTimer <= 0) beginWave();
-    } else if (state.phase === 'wave') {
+    // 'prep' is never actually entered anymore (beginPrep() now calls beginWave()
+    // immediately — the 3s countdown was removed by request), so there's no per-frame
+    // handling for it here; state.phase briefly passes through 'prep' as a transient
+    // "not idle" marker in a couple of places but is overwritten before a frame ever
+    // sees it. Left `isRunLocked()`'s 'prep' check alone since it's a harmless no-op
+    // safety net, not dead code causing confusion the way this branch would be.
+    if (state.phase === 'wave') {
       state.waveTimer -= dt;
       state.spawnTimer += dt;
       while (state.spawnQueue.length && state.spawnQueue[0].t <= state.spawnTimer) {
         const sp = state.spawnQueue.shift();
         spawnMonster(sp.kind);
       }
-      tickMonsters(dt);
-      tickCombat(dt);
+      // Fixed Time Step: simulate this frame's combat/movement in FIXED_STEP-sized
+      // chunks instead of one big `dt` call — see the constants/comment above.
+      combatAccum = Math.min(combatAccum + dt, FIXED_STEP * (MAX_SUBSTEPS_PER_FRAME + 2));
+      let substeps = 0;
+      while (combatAccum >= FIXED_STEP && substeps < MAX_SUBSTEPS_PER_FRAME) {
+        tickMonsters(FIXED_STEP);
+        tickCombat(FIXED_STEP);
+        combatAccum -= FIXED_STEP;
+        substeps++;
+      }
       // dying monsters linger briefly for their death-fade animation (see below), so
       // they must NOT count toward the swarm cap — otherwise the very kill that should
       // have saved the player could still trigger a false game-over for ~0.28s
@@ -2234,6 +2331,10 @@ function draw() {
 
   // lingering zone effects (fire/plague), drawn under units/monsters
   for (const z of state.zones) {
+    // oracle-style buff zones no longer show a range/boundary animation at all (by
+    // request) — the buff itself still applies normally (see updateZoneBuffs), it's
+    // just invisible on the field instead of drawing a circle where its radius is
+    if (z.kind === 'buff') continue;
     const nowZ = performance.now();
     const pulse = 0.16 + Math.sin(nowZ / 300 + z.x) * 0.05;
     // radial gradient (hot core fading to edge) instead of a flat translucent disc —
@@ -2255,20 +2356,6 @@ function draw() {
       ctx.arc(z.x, z.y, edgeR, 0, Math.PI * 2);
       ctx.strokeStyle = 'rgba(193,122,65,0.45)';
       ctx.lineWidth = 1.8;
-      ctx.stroke();
-    } else if (z.kind === 'buff') {
-      // soft double-ring shimmer, no dashing/rotation — reads as a calm "blessing" field
-      // rather than the hazard-y spinning edges used by plague/tornado
-      const shimmer = 0.35 + Math.sin(nowZ / 260 + z.x) * 0.15;
-      ctx.beginPath();
-      ctx.arc(z.x, z.y, z.r, 0, Math.PI * 2);
-      ctx.strokeStyle = `rgba(${zCol},${shimmer})`;
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(z.x, z.y, z.r * 0.86, 0, Math.PI * 2);
-      ctx.strokeStyle = `rgba(224,199,101,${shimmer * 0.7})`;
-      ctx.lineWidth = 1;
       ctx.stroke();
     } else if (z.kind === 'tornado') {
       // fast-spinning pinwheel spokes instead of a static/dashed edge — the one zone
@@ -2564,8 +2651,12 @@ function draw() {
     // just vanishing on the frame their hp crosses 0 — reads as an actual kill, and
     // still holds up at high game-speed multipliers since it runs on real time
     const dyingT = m.dying ? Math.min(1, (m.deathT || 0) / 0.28) : 0;
-    const deathScale = 1 - dyingT * 0.7;
-    const deathAlpha = 1 - dyingT;
+    // eased (quadratic in) shrink+fade: starts slow (still reads as "just died") then
+    // accelerates away, instead of a constant-speed linear shrink — a small change but
+    // it reads less like a UI element sliding out and more like an actual death impact
+    const dyingEase = dyingT * dyingT;
+    const deathScale = 1 - dyingEase * 0.7;
+    const deathAlpha = 1 - dyingEase;
     // a tiny idle bob so the field doesn't look like static tokens sitting on rails —
     // per-monster phase offset (via id) keeps them from all bobbing in lockstep
     const bob = m.dying ? 0 : Math.sin(nowDrawMonsters / 260 + m.id) * 1.3;
@@ -3248,7 +3339,7 @@ document.getElementById('startBtn').onclick = () => {
 document.getElementById('restartBtn').onclick = () => { resetRun(); showScreen('game'); };
 
 document.querySelectorAll('.speedBtn').forEach(btn => {
-  btn.onclick = () => { state.speedMult = Number(btn.dataset.speed); render(); };
+  btn.onclick = () => { state.speedMult = Math.min(MAX_SPEED_MULT, Number(btn.dataset.speed)); render(); };
 });
 
 document.getElementById('goGameBtn').onclick = () => { resetRun(); showScreen('game'); };
