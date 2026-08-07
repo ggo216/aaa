@@ -11,7 +11,7 @@
 <title>AAA</title>
 <link rel="preconnect" href="https://cdn.jsdelivr.net">
 <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css">
-<link rel="stylesheet" href="style.css?v=20260807">
+<link rel="stylesheet" href="style.css?v=20260813">
 </head>
 <body>
 <div id="app">
@@ -92,6 +92,11 @@
 
       <div id="benchWrap">
         <div class="panelTitle"><span class="ptIcon" data-icon="bag"></span>대기 유닛</div>
+        <div id="benchBulkRow" class="benchBulkRow">
+          <button id="summonAllBtn" class="ghostBtn">전체 소환</button>
+          <button id="placeAllBtn" class="ghostBtn">전체 배치</button>
+          <button id="sellAllBenchBtn" class="ghostBtn">전체 판매</button>
+        </div>
         <div id="benchList" class="cardGrid"></div>
       </div>
 
@@ -175,6 +180,12 @@
 
     <div id="labSubTabs"></div>
 
+    <!-- 이 서브타입이 10레벨에 무작위로 갈라지는 두 전직 갈래 안내 -->
+    <div id="labJobPanel" class="panelBlock">
+      <div class="panelTitle">전직 갈래 (10레벨 무작위 결정)</div>
+      <div id="labJobBranches"></div>
+    </div>
+
     <div id="labTreePanel" class="panelBlock">
       <div id="labTreeGrid"></div>
     </div>
@@ -186,10 +197,10 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
-<script src="firebase-config.js?v=20260806"></script>
-<script src="icons.js?v=20260806"></script>
-<script src="data.js?v=20260806"></script>
-<script src="game.js?v=20260807"></script>
-<script src="cloud.js?v=20260806"></script>
+<script src="firebase-config.js?v=20260813"></script>
+<script src="icons.js?v=20260813"></script>
+<script src="data.js?v=20260815"></script>
+<script src="game.js?v=20260815"></script>
+<script src="cloud.js?v=20260813"></script>
 </body>
 </html>

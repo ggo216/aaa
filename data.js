@@ -178,6 +178,189 @@ const LAB_TREES = {
   ],
 };
 
+// ===================== 유닛 성장 / 전직 시스템 (unit level & job advancement) =====================
+// 필드에 배치된 유닛은 몬스터를 처치하며 경험치를 얻는다. 단독 처치는 경험치 100%,
+// 여러 유닛이 피해를 주거나 버프/치유/보호막으로 도왔다면 기여자 수로 1/n 분배된다
+// (game.js의 addXpContributor / onMonsterKilled 참고).
+//
+// 레벨은 RUN 단위(런이 끝나면 초기화 — 배치/대기 유닛과 동일한 수명)이며 최대 30.
+// 10/20/30 레벨에서 2차/3차/4차 전직이 자동 발동한다. 갈래(branch) 선택은 2차 때
+// 단 한 번, 무작위로 결정되고 3·4차는 그 갈래를 더 깊게 파고든다.
+const MAX_UNIT_LEVEL = 30;
+const JOB_TIER_LEVELS = [10, 20, 30]; // 2차 / 3차 / 4차 전직 레벨
+
+// 레벨당 소폭 상승하는 전체 스탯 (ENHANCE_STAT_BONUS와 동일한 "레벨당 +%" 패턴이지만,
+// 10레벨짜리 강화 시스템보다 훨씬 긴 1~30 곡선이라 레벨당 폭은 더 작다)
+const JOB_LEVEL_STAT_BONUS = { atk: 0.022, range: 0.008, aspd: 0.012, hp: 0.020 };
+// 전직 차수 자체가 주는 추가 배율 (index = jobTier, 1=기본 / 2·3·4=전직)
+const JOB_TIER_ATK_BONUS = [0, 0, 0.15, 0.34, 0.60];
+const JOB_TIER_HP_BONUS = [0, 0, 0.12, 0.28, 0.50];
+// 전직 차수마다 레전더리/연구실 스킬 위력도 함께 강화된다 (skillDmgPct에 합산)
+const JOB_TIER_SKILL_DMG = [0, 0, 25, 60, 110];
+
+// 다음 레벨까지 필요한 경험치 (누적 아님).
+// 지수 곡선(1.17^n)을 먼저 써봤다가 폐기했다: 웨이브당 경험치 수입은 대략 "선형"으로
+// 늘어나므로 누적 수입은 웨이브 수의 제곱에 가깝게 자라는데, 지수 요구량은 그보다
+// 훨씬 빨리 도망가서 실측상 13웨이브에 겨우 8레벨 — 3차/4차 전직을 런 안에서 아예
+// 볼 수 없었다. 선형 증가(=누적 요구량이 2차식)로 바꾸면 요구량과 수입이 같은 차수로
+// 자라서, 10/20/30레벨 전직이 대략 10/20/30웨이브 근처에 자연스럽게 걸린다.
+// 계수는 실측으로 두 번 조정했다. 처음의 가파른 선형(18+14n)은 여전히 뒤로 갈수록
+// 수입을 앞질러서 19웨이브에 15레벨에 그쳤다 — 웨이브당 수입 증가가 기대만큼 가파르지
+// 않았기 때문(웨이브당 몬스터 수는 거의 일정하고 웨이브 길이도 길어진다).
+// 거의 평탄한 증가로 낮춰 요구량 곡선을 실제 수입 곡선(대략 W^1.3)에 맞춘다.
+// 누적: 10레벨까지 639, 20레벨까지 1729, 30레벨까지 3219 (비율 1 : 2.7 : 5.0).
+function unitXpToNext(level) { return 55 + (level - 1) * 4; }
+
+// 몬스터가 주는 경험치 — 골드 공식(1 + wave/4)과 같은 결에서, 중간보스/보스는 훨씬 큼.
+// 계수는 "9유닛 만원 필드(= 모든 킬이 9등분되는 최악의 분배 조건)"에서 위 곡선과 맞물려
+// 10/20/30웨이브 무렵 각 전직이 걸리도록 실측으로 맞춘 값이다. 유닛을 적게 깔면 1/n의
+// n이 작아져 훨씬 빨리 큰다 — 의도된 트레이드오프.
+function monsterXpValue(wave, kind) {
+  // 2차항을 조금 섞어 후반 웨이브의 수입이 난이도 상승과 함께 따라 오르게 한다 —
+  // 순수 선형이면 20/30웨이브대 수입이 3·4차 전직 요구량을 못 따라잡는다
+  const base = 13 + wave * 3.0 + wave * wave * 0.06;
+  if (kind === 'boss') return base * 26;
+  if (kind === 'mid') return base * 8;
+  return base;
+}
+
+// ---- 9개 서브타입 × 2갈래 = 18개 전직 설계 ----
+// 각 갈래는 해당 서브타입이 "이미 가진" 메커니즘(폭탄 부착 / 광란 / 화염지대 / 서리스택 /
+// 번개 연쇄 / 저주·역병 / 버프지대·터렛 / 치유 / 도발·보호막)에서 뻗어 나오며,
+// 한쪽은 순수 파괴력·폭발, 다른 한쪽은 유틸리티·제어·지원 쪽으로 확실히 갈린다.
+// stat: 전직 "차수 1단계당" 붙는 수치 보정 (2차=×1, 3차=×2, 4차=×3)
+const JOB_BRANCHES = {
+  atk_single: [
+    // 보스 학살형: 공속을 크게 희생하는 대신 한 방이 무겁다. 일반 몹은 처형으로 즉시
+    // 지우고, 처형이 통하지 않는 보스/중간보스에게는 대신 "처형 각인"을 누적시켜
+    // 아군 전체가 주는 피해를 계속 키운다 — 느린 공속 / 큰 한 방 / 보스 특화의 축.
+    { id: 'as_exec', name: '처형자', short: '처형·보스 학살', tiers: ['사형집행인', '단두대', '종언의 심판'],
+      desc: '느리지만 압도적으로 무거운 한 방. 체력이 낮은 일반 적은 즉시 베어내고, 처형이 통하지 않는 보스에게는 처형 각인을 누적시켜 받는 피해를 계속 키운다',
+      stat: { atkPct: 15, aspdPct: -8, critAdd: 4, critDmgAdd: 16, bossAdd: 15 } },
+    // 일반형: 빠른 공속 + 광역 폭발 + 일반 몬스터 특화. 보스 앞에서는 처형자에게 밀리지만
+    // 물량 웨이브를 통째로 지우는 쪽으로 확실히 갈린다.
+    { id: 'as_bomb', name: '폭파공', short: '광역·물량 섬멸', tiers: ['폭탄술사', '연쇄 폭파', '절멸 기폭'],
+      desc: '단일 강타를 버리고 빠른 공속과 광역 지연 폭발을 택한다. 스플래시와 일반 몬스터 추가 피해에 특화되어 물량 웨이브를 통째로 정리한다',
+      stat: { atkPct: 5, aspdPct: 11, rangePct: 5, splashAdd: 10, normalAdd: 12 } },
+  ],
+  atk_multi: [
+    { id: 'am_frenzy', name: '광전사', short: '광란 지속', tiers: ['피의 광란', '무한 난도질', '불멸의 광전'],
+      desc: '광란(자가 공속 폭증)을 상시에 가깝게 유지한다. 타격할수록 스스로 빨라지고, 4차에서는 동시 타격 대상까지 늘어난다',
+      stat: { aspdPct: 14, atkPct: 4, targetsAdd: 0 } },
+    { id: 'am_quake', name: '분쇄자', short: '광역 폭발', tiers: ['대지 분쇄', '지진파', '대격변'],
+      desc: '유혈 대폭발을 기본공격에 상시 부여한다. 한 번의 휘두름이 곧 폭심지가 되며 범위와 여파가 계속 커진다',
+      stat: { atkPct: 11, splashAdd: 22, rangePct: 6 } },
+  ],
+  magic_multi: [
+    { id: 'mm_pyro', name: '화염술사', short: '화상·화염지대', tiers: ['불의 낙인', '화염 폭풍', '겁화의 대재앙'],
+      desc: '확률에 기대던 화상과 잔류 화염지대를 기본공격의 확정 효과로 만든다. 4차에서는 불타는 적이 "취약" 상태가 되어 모든 아군에게 더 큰 피해를 받는다',
+      stat: { atkPct: 6, dotAdd: 18, rangePct: 7 } },
+    { id: 'mm_astral', name: '천공술사', short: '메테오 폭격', tiers: ['운석 소환', '유성우', '천공의 종말'],
+      desc: '지속피해 대신 하늘에서 떨어지는 한 방에 집중한다. 일정 횟수마다 기본공격이 텔레그래프 후 낙하하는 메테오로 바뀌며, 3차부터는 낙하 충격이 적을 기절시킨다',
+      stat: { atkPct: 13, critDmgAdd: 12, bossAdd: 8 } },
+  ],
+  magic_ctrl: [
+    // 두 갈래가 모두 "둔화 변종"이 되지 않도록, 제어의 종류 자체를 갈라놓았다.
+    // 빙결술사 = 붙잡아 두는 쪽(결빙 → 속박), 한파술사 = 끊고 무력화하는 쪽(기절 → 봉인).
+    { id: 'mc_glacier', name: '빙결술사', short: '결빙·속박', tiers: ['서리 각인', '영구동토', '절대영도의 주인'],
+      desc: '적을 그 자리에 붙들어 두는 데 특화된다. 기본공격이 확정적으로 서리를 쌓아 3중첩 결빙을 터뜨리고, 3차부터는 결빙이 속박(완전 정지 + 취약)으로 굳으며 4차에서는 주변까지 번진다',
+      stat: { slowAdd: 10, atkPct: 4, rangePct: 6 } },
+    { id: 'mc_rime', name: '한파술사', short: '기절·봉인', tiers: ['혹한의 저주', '한파의 심판', '동토의 재앙'],
+      desc: '붙잡는 대신 끊어버린다. 둔화된 적을 추가로 두들기며 확률로 기절시키고, 4차에서는 보스/중간보스의 스킬 시전 자체를 봉인한다',
+      stat: { atkPct: 12, slowAdd: 5, critDmgAdd: 10 } },
+  ],
+  ranged_single: [
+    // 저격형: 더 넓은 사거리 / 높은 공격력 / 느린 공속 — 한 발의 무게로 싸운다
+    { id: 'rs_sniper', name: '저격수', short: '장거리 관통 저격', tiers: ['정밀 관통', '초장거리 저격', '일점 파열'],
+      desc: '사거리를 극단까지 늘리고 공속을 버리는 대신, 한 발이 조준선 위의 적을 전부 꿰뚫는다. 맵 반대편의 보스를 뒤에서 계속 두들기는 역할',
+      stat: { atkPct: 18, aspdPct: -9, rangePct: 16, bossAdd: 16, critDmgAdd: 10 } },
+    // 속사기형: 사거리와 한 방의 무게를 포기하고 공속으로 밀어붙이며, 그 타수를 전부
+    // 연쇄 번개로 환산해 군중을 처리한다
+    { id: 'rs_storm', name: '뇌전술사', short: '속사·연쇄 번개', tiers: ['감전 사격', '폭풍 연쇄', '뇌신의 강림'],
+      desc: '사거리 대신 공속을 극단으로 끌어올린다. 쏟아붓는 타수마다 번개가 튀어, "몇 명에게 튀느냐"로 싸우는 군중 처리형',
+      stat: { aspdPct: 18, atkPct: 5, critAdd: 5, rangePct: -4 } },
+  ],
+  buff_debuff: [
+    { id: 'bd_plague', name: '역병술사', short: '역병지대', tiers: ['역병 파종', '창궐', '흑사의 군림'],
+      desc: '저주보다 땅을 오염시키는 쪽을 택한다. 기본공격이 역병지대를 남기고, 차수가 오를수록 지대가 커지고 오래 남는다',
+      stat: { atkPct: 5, dotAdd: 16, rangePct: 9 } },
+    { id: 'bd_doom', name: '파멸술사', short: '저주 증폭', tiers: ['파멸의 표식', '전염되는 저주', '대재앙의 예언자'],
+      desc: '저주 그 자체를 극단으로 밀어붙인다. 표식이 찍힌 적은 모든 아군에게서 훨씬 큰 피해를 받고, 저주가 주변으로 전염된다',
+      stat: { debuffAdd: 20, atkPct: 6, bossAdd: 10 } },
+  ],
+  buff_support: [
+    // 버프 "종류"를 늘리는 축: 2차는 순수 강도, 3차부터 공속 성가, 4차에서 치명타 성가가
+    // 추가로 열려서 차수가 오를수록 오라의 폭이 넓어진다 (강도만 커지는 게 아니라)
+    { id: 'bs_warchant', name: '전쟁성가', short: '다중 오라 강화', tiers: ['전투의 찬가', '승전가', '군신의 성가'],
+      desc: '오라의 강도와 "종류"를 함께 넓힌다. 2차는 공격력·보스 피해, 3차에서 진군의 공속 성가, 4차에서 치명타 성가와 사거리 축복까지 겹쳐 울린다',
+      stat: { auraPowerPct: 20, atkPct: 4 } },
+    { id: 'bs_artificer', name: '기공술사', short: '보조 터렛', tiers: ['자동 포탑', '포탑 진지', '강철 군단'],
+      desc: '오라 강도를 조금 양보하고, 스킬에서만 나오던 보조 터렛을 상시로 뽑아낸다. 지원형이면서 스스로 화력을 만들어내는 갈래',
+      stat: { auraPowerPct: 8, atkPct: 12 } },
+  ],
+  heal_support: [
+    { id: 'hs_bloom', name: '생명의 원천', short: '순수 치유', tiers: ['생명 개화', '재생의 샘', '불멸의 성역'],
+      desc: '치유량 자체를 극대화하고, 넘친 치유는 보호막(피해 경감)으로 굳는다. 3차부터는 위독한(체력 50% 미만) 아군을 훨씬 크게 응급 치유하는 선별 치유가 열린다',
+      stat: { healAdd: 26, shieldAdd: 5, rangePct: 8 } },
+    { id: 'hs_zealot', name: '수호천사', short: '공격형 치유', tiers: ['축복의 손길', '성전의 인도자', '심판의 광휘'],
+      desc: '치유가 곧 버프가 된다. 치유받은 아군은 공격력·공속·치명타가 오르고, 4차에서는 치유의 파동이 주변 적까지 태운다',
+      stat: { healAdd: 10, atkPct: 14, aspdPct: 6 } },
+  ],
+  tank_guard: [
+    { id: 'tg_bulwark', name: '불굴의 방벽', short: '보호막 특화', tiers: ['철벽', '난공불락', '영원한 성채'],
+      desc: '피해 경감 오라와 자신의 체력을 끝까지 밀어올린다. 3차부터는 주기적으로 방벽 충격파를 터뜨려 주변 적을 기절시키고, 4차에서는 받은 피해의 일부를 그대로 되돌려준다',
+      stat: { hpPct: 22, shieldAdd: 7, rangePct: 6 } },
+    { id: 'tg_provoker', name: '도발자', short: '도발·속박', tiers: ['전장의 함성', '광역 도발', '전장의 지배자'],
+      desc: '맞아주는 것에 그치지 않고 적을 끌어모아 묶어놓는다. 도발된 적은 둔화 + 취약 상태가 되고, 4차에서는 아예 속박되어 그 자리에 발이 묶인다',
+      stat: { hpPct: 10, atkPct: 15, splashAdd: 14 } },
+  ],
+};
+
+const JOB_BRANCH_BY_ID = {};
+for (const subKey of Object.keys(JOB_BRANCHES)) {
+  for (const b of JOB_BRANCHES[subKey]) { b.subKey = subKey; JOB_BRANCH_BY_ID[b.id] = b; }
+}
+// 전직 차수 표기 (jobTier 1 = 미전직)
+const JOB_TIER_LABEL = ['', '기본', '2차', '3차', '4차'];
+
+// ---- 전직 시스템과 맞물리는 연구실 노드 (모든 서브타입 트리에 공통 추가) ----
+// 기존 root->branch->leaf->capstone 사슬은 그대로 두고, 성장/전직에만 작용하는 세 노드를
+// 덧붙인다. 셋 다 "전직을 해야/깊게 파야 의미가 있는" 노드라서, 연구실 투자와 필드 육성이
+// 서로를 끌어올리는 구조가 된다.
+//  - 숙련 교본(xpGain): 경험치 획득량 증가 — 전직을 더 빨리 보게 해주는 진입 노드
+//  - 전직 특화(branchMastery): 갈래 고유 메커니즘(처형 문턱/폭탄 확률/결빙 지속 등)의 강도 증가
+//  - 전직 공명(jobSync): 전직 차수에 비례하는 전체 공격력 증가 — 4차 유닛에게 가장 크게 작용
+for (const subKey of Object.keys(LAB_TREES)) {
+  const tree = LAB_TREES[subKey];
+  tree.push(passiveNode('xpGain', '숙련 교본', 'sparkle', 'xpGainPct', 4.0, 'root', 3));
+  tree.push(passiveNode('branchMastery', '전직 특화', 'target', 'branchPowerPct', 3.0, 'leafA', 3));
+  tree.push(passiveNode('jobSync', '전직 공명', 'buff', 'jobPowerPct', 2.5, 'capstone', 3));
+}
+
+// ---- 서브타입별 "특화" 노드 한 쌍 (specA / specB) ----
+// 갈래는 10레벨에 무작위로 정해지고 바꿀 수 없다 — 그래서 "내 유닛의 개성을 내가 고른다"는
+// 축은 갈래가 아니라 연구실이 맡아야 한다. 각 서브타입에 서로 반대 방향을 가리키는 두 노드를
+// 두어, 같은 갈래를 뽑았더라도 어떤 맛으로 밀지(정밀/속사, 보스/물량, 붙잡기/끊기, 치유/보호막
+// …)를 플레이어가 직접 정하게 만든다. 둘 다 찍을 수도 있지만 포인트가 유한하므로 실질적으로는
+// 선택이 된다. specA는 leafA Lv.3, specB는 leafB Lv.3을 요구해 기존 사슬의 결을 그대로 따른다.
+const LAB_SPEC_NODES = {
+  atk_single:   [['specA', '참수 각인', 'skull', 'bossDmgPct', 2.2], ['specB', '군중 분쇄', 'multislash', 'splashPct', 2.2]],
+  atk_multi:    [['specA', '광란의 맥동', 'fastfwd', 'aspdPct', 1.1], ['specB', '대지 균열', 'sparkle', 'splashPct', 2.4]],
+  magic_multi:  [['specA', '겁화의 낙인', 'fire', 'dotChance', 0.9], ['specB', '천공 낙하', 'target', 'critDmgAdd', 2.6]],
+  // 제어형만 제어 강도(ccPowerPct)라는 전용 축을 갖는다 — 결빙/속박/기절/봉인 지속시간에 작용
+  magic_ctrl:   [['specA', '속박의 사슬', 'frost', 'ccPowerPct', 2.6], ['specB', '균열 증폭', 'debuff', 'debuffPct', 1.3]],
+  ranged_single:[['specA', '초장거리 조준', 'target', 'rangePct', 1.7], ['specB', '속사 훈련', 'fastfwd', 'aspdPct', 1.3]],
+  buff_debuff:  [['specA', '역병 확산', 'flask', 'dotChance', 1.0], ['specB', '파멸의 예언', 'debuff', 'debuffPct', 1.5]],
+  buff_support: [['specA', '질주의 오라', 'fastfwd', 'auraAspdPct', 1.6], ['specB', '광역 축복', 'sparkle', 'auraRangePct', 2.0]],
+  heal_support: [['specA', '치유 증폭', 'heart', 'healPct', 2.4], ['specB', '수호의 결계', 'shield', 'shieldPct', 1.1]],
+  tank_guard:   [['specA', '불굴의 육체', 'heart', 'guardHpPct', 2.2], ['specB', '격노의 도발', 'target', 'tauntPowerPct', 2.6]],
+};
+for (const subKey of Object.keys(LAB_SPEC_NODES)) {
+  const [a, b] = LAB_SPEC_NODES[subKey];
+  LAB_TREES[subKey].push(passiveNode(a[0], a[1], a[2], a[3], a[4], 'leafA', 3));
+  LAB_TREES[subKey].push(passiveNode(b[0], b[1], b[2], b[3], b[4], 'leafB', 3));
+}
+
 const TRAIT_POOL = [
   { key: 'critChance', label: '치명타 확률', fmt: v => `치확+${v}%` },
   { key: 'critDmg',    label: '치명타 피해', fmt: v => `치피+${v}%` },
